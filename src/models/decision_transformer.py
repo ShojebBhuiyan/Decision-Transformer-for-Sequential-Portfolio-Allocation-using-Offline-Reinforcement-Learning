@@ -21,20 +21,23 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.shape
         qkv = self.qkv(x).reshape(B, T, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
-
-        causal = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
-        allowed = causal.view(1, 1, T, T).expand(B, self.n_heads, -1, -1)
-        if mask is not None:
-            pad_mask = mask.bool().unsqueeze(1).unsqueeze(2)
-            allowed = allowed & pad_mask
-        # Guarantee diagonal is always attendable (prevents all-masked rows -> NaN)
-        eye = torch.eye(T, device=x.device, dtype=torch.bool).view(1, 1, T, T)
-        allowed = allowed | eye
-
         dropout_p = self.dropout.p if self.training else 0.0
-        out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=allowed, dropout_p=dropout_p
-        )
+
+        if mask is None:
+            # Fused causal kernel; no mask tensor to materialize
+            out = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=dropout_p, is_causal=True
+            )
+        else:
+            causal = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
+            allowed = causal.view(1, 1, T, T) & mask.bool().view(B, 1, 1, T)
+            # Guarantee diagonal is attendable so no row is fully masked (-> NaN)
+            eye = torch.eye(T, device=x.device, dtype=torch.bool).view(1, 1, T, T)
+            allowed = allowed | eye
+            out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=allowed, dropout_p=dropout_p
+            )
+
         out = out.transpose(1, 2).reshape(B, T, C)
         return self.proj(out)
 
@@ -125,8 +128,9 @@ class DecisionTransformer(nn.Module):
         pos = self.pos_embed[:, : 3 * K, :]
         x = self.drop(tokens + pos)
 
-        # Expand mask for 3 tokens per step
-        if mask is not None:
+        # Expand mask for 3 tokens per step. A fully-valid mask is equivalent to
+        # no mask, so drop it to reach the fused causal attention kernel.
+        if mask is not None and not bool(mask.all()):
             expanded_mask = mask.unsqueeze(-1).repeat(1, 1, 3).reshape(B, 3 * K)
         else:
             expanded_mask = None

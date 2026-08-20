@@ -31,7 +31,7 @@ class TransformerBC(DecisionTransformer):
         pos = self.pos_embed[:, : 2 * K, :]
         x = self.drop(tokens + pos)
 
-        if mask is not None:
+        if mask is not None and not bool(mask.all()):
             expanded_mask = mask.unsqueeze(-1).repeat(1, 1, 2).reshape(B, 2 * K)
         else:
             expanded_mask = None

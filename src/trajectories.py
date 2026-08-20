@@ -350,10 +350,12 @@ class TrajectoryDataset(Dataset):
 
 class GPUTrajectoryBuffer:
     """
-    GPU-resident trajectory buffer with on-device batch gathering.
+    Trajectory buffer with vectorized batch gathering.
 
-    Uploads all arrays once; builds batches via index gather with no
-    per-step host-to-device transfers.
+    By default stores arrays on CPU (pinned when CUDA is used) and transfers
+    only the assembled batch to the compute device. This fits 8 GB GPUs while
+    still avoiding per-sample DataLoader assembly. Set ``gpu_resident=True`` to
+    keep all arrays on the compute device (needs ~2+ GB headroom).
     """
 
     def __init__(
@@ -364,22 +366,36 @@ class GPUTrajectoryBuffer:
         last_state_only: bool = False,
         val_fraction: float = 0.1,
         seed: int = 42,
+        gpu_resident: bool | None = None,
     ):
         self.device = device
         self.last_state_only = last_state_only
         K = context_length or int(cfg.get("model", "context_length", default=30))
         self.context_length = K
 
+        if gpu_resident is None:
+            gpu_resident = bool(cfg.get("training", "gpu_resident_buffer", default=False))
+
         root = cfg.project_root
         traj_path = root / cfg.get("trajectories", "output_dir", default="data/trajectories") / "trajectories.npz"
         data = _load_trajectory_npz(traj_path)
 
-        self.global_states = torch.from_numpy(data["states"].astype(np.float32)).to(device)
-        self.episode_starts = torch.from_numpy(data["episode_starts"].astype(np.int64)).to(device)
-        self.actions = torch.from_numpy(data["actions"].astype(np.float32)).to(device)
-        self.rewards = torch.from_numpy(data["rewards"].astype(np.float32)).to(device)
-        self.rtg = torch.from_numpy(data["rtg"].astype(np.float32)).to(device)
-        self.lengths = torch.from_numpy(data["lengths"].astype(np.int64)).to(device)
+        storage = device if gpu_resident else "cpu"
+        self.storage_device = storage
+        self.gpu_resident = gpu_resident
+
+        def _load_array(name: str, dtype) -> torch.Tensor:
+            t = torch.from_numpy(data[name].astype(dtype))
+            if storage == "cpu" and device != "cpu":
+                t = t.pin_memory()
+            return t.to(storage)
+
+        self.global_states = _load_array("states", np.float32)
+        self.episode_starts = _load_array("episode_starts", np.int64)
+        self.actions = _load_array("actions", np.float32)
+        self.rewards = _load_array("rewards", np.float32)
+        self.rtg = _load_array("rtg", np.float32)
+        self.lengths = _load_array("lengths", np.int64)
         self.rtg_mean = float(data.get("rtg_mean", 0.0))
         self.rtg_std = float(data.get("rtg_std", 1.0))
         self.state_dim = self.global_states.shape[1]
@@ -387,59 +403,71 @@ class GPUTrajectoryBuffer:
         self.n_episodes = len(self.lengths)
 
         # Flat index: (episode_idx, local_t) for every valid transition
-        ep_indices = []
-        local_ts = []
-        for ep in range(self.n_episodes):
-            L = int(self.lengths[ep].item())
-            for t in range(L):
-                ep_indices.append(ep)
-                local_ts.append(t)
-        self.ep_indices = torch.tensor(ep_indices, dtype=torch.long, device=device)
-        self.local_ts = torch.tensor(local_ts, dtype=torch.long, device=device)
+        lengths_np = data["lengths"].astype(np.int64)
+        ep_indices = np.repeat(np.arange(len(lengths_np), dtype=np.int64), lengths_np)
+        ep_offsets = np.concatenate([[0], np.cumsum(lengths_np)[:-1]])
+        local_ts = np.arange(int(lengths_np.sum()), dtype=np.int64) - np.repeat(
+            ep_offsets, lengths_np
+        )
+        self.ep_indices = torch.from_numpy(ep_indices).to(storage)
+        self.local_ts = torch.from_numpy(local_ts).to(storage)
         self.n_samples = len(self.ep_indices)
 
-        # Train/val split
-        g = torch.Generator().manual_seed(seed)
-        perm = torch.randperm(self.n_samples, generator=g)
+        # Train/val split on storage device
+        g = torch.Generator(device=storage).manual_seed(seed)
+        perm = torch.randperm(self.n_samples, generator=g, device=storage)
         n_val = max(1, int(val_fraction * self.n_samples))
         self.val_indices = perm[:n_val]
         self.train_indices = perm[n_val:]
 
+    def _to_compute(self, t: torch.Tensor) -> torch.Tensor:
+        if self.storage_device == self.device:
+            return t
+        return t.to(self.device, non_blocking=True)
+
     def sample_batch(self, indices: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Gather a batch by flat sample indices (already on device)."""
+        """Gather a batch by flat sample indices."""
+        indices = indices.to(self.storage_device)
         ep = self.ep_indices[indices]
         t = self.local_ts[indices]
+
+        # Genuine next state within the episode, plus terminal flag, so the
+        # Bellman target is not self-referential.
+        ep_len = self.lengths[ep]
+        next_t = torch.minimum(t + 1, ep_len - 1)
+        dones = (t + 1 >= ep_len).float()
+        next_global_t = self.episode_starts[ep] + next_t
+        next_states = self.global_states[next_global_t]
 
         if self.last_state_only:
             global_t = self.episode_starts[ep] + t
             states = self.global_states[global_t]
             target_action = self.actions[ep, t]
             rewards = self.rewards[ep, t]
+            B = len(indices)
             return {
-                "states": states.unsqueeze(1),
-                "actions": target_action.unsqueeze(1),
-                "rewards": rewards.unsqueeze(1),
-                "rtg": torch.zeros(len(indices), 1, 1, device=self.device),
-                "mask": torch.ones(len(indices), 1, device=self.device),
-                "target_action": target_action,
+                "states": self._to_compute(states.unsqueeze(1)),
+                "next_states": self._to_compute(next_states.unsqueeze(1)),
+                "dones": self._to_compute(dones.unsqueeze(1)),
+                "actions": self._to_compute(target_action.unsqueeze(1)),
+                "rewards": self._to_compute(rewards.unsqueeze(1)),
+                "rtg": torch.zeros(B, 1, 1, device=self.device),
+                "mask": torch.ones(B, 1, device=self.device),
+                "target_action": self._to_compute(target_action),
             }
 
         B = len(indices)
         K = self.context_length
-        offsets = torch.arange(K, device=self.device) - (K - 1)  # [-(K-1), ..., 0]
-        local_idx = t.unsqueeze(1) + offsets.unsqueeze(0)  # (B, K)
-        ep_start_local = torch.zeros(B, dtype=torch.long, device=self.device)
+        offsets = torch.arange(K, device=self.storage_device) - (K - 1)
+        local_idx = t.unsqueeze(1) + offsets.unsqueeze(0)
         mask = (local_idx >= 0).float()
         local_idx_clamped = local_idx.clamp(min=0)
 
-        # Gather actions, rewards, rtg per episode
         ep_exp = ep.unsqueeze(1).expand(-1, K)
         batch_actions = self.actions[ep_exp, local_idx_clamped]
         batch_rewards = self.rewards[ep_exp, local_idx_clamped]
-        batch_rtg = self.rtg[ep_exp, local_idx_clamped]
-        batch_rtg = (batch_rtg - self.rtg_mean) / self.rtg_std
+        batch_rtg = (self.rtg[ep_exp, local_idx_clamped] - self.rtg_mean) / self.rtg_std
 
-        # Gather global states
         global_idx = self.episode_starts[ep].unsqueeze(1) + local_idx_clamped
         global_idx = global_idx.clamp(max=self.global_states.shape[0] - 1)
         batch_states = self.global_states[global_idx]
@@ -447,25 +475,37 @@ class GPUTrajectoryBuffer:
         target_action = self.actions[ep, t]
 
         return {
-            "states": batch_states,
-            "actions": batch_actions,
-            "rewards": batch_rewards,
-            "rtg": batch_rtg.unsqueeze(-1),
-            "mask": mask,
-            "target_action": target_action,
+            "states": self._to_compute(batch_states),
+            "next_states": self._to_compute(next_states.unsqueeze(1)),
+            "dones": self._to_compute(dones.unsqueeze(1)),
+            "actions": self._to_compute(batch_actions),
+            "rewards": self._to_compute(batch_rewards),
+            "rtg": self._to_compute(batch_rtg.unsqueeze(-1)),
+            "mask": self._to_compute(mask),
+            "target_action": self._to_compute(target_action),
         }
 
     def train_batch_indices(self, batch_size: int, steps_per_epoch: int | None = None) -> list[torch.Tensor]:
-        """Generate shuffled train batch index tensors for one epoch."""
+        """
+        Shuffled train batch indices for one epoch.
+
+        Draws a single permutation and slices it into disjoint batches, so an
+        epoch is a genuine pass over the data rather than repeated resampling.
+        """
         n = len(self.train_indices)
-        steps = steps_per_epoch if steps_per_epoch and steps_per_epoch > 0 else max(1, n // batch_size)
-        batches = []
-        for _ in range(steps):
-            perm = self.train_indices[torch.randperm(n, device=self.device)]
-            idx = perm[:batch_size]
-            if len(idx) == batch_size:
-                batches.append(idx)
-        return batches if batches else [self.train_indices[:batch_size]]
+        full_steps = max(1, n // batch_size)
+        steps = full_steps
+        if steps_per_epoch and steps_per_epoch > 0:
+            steps = min(steps_per_epoch, full_steps)
+        perm = self.train_indices[torch.randperm(n, device=self.storage_device)]
+        return [perm[i * batch_size : (i + 1) * batch_size] for i in range(steps)]
+
+    def val_batch_indices(self, batch_size: int, max_batches: int | None = None) -> list[torch.Tensor]:
+        """Validation batches, optionally capped for faster epochs."""
+        batches = self.val_batches(batch_size)
+        if max_batches and max_batches > 0:
+            return batches[:max_batches]
+        return batches
 
     def val_batches(self, batch_size: int) -> list[torch.Tensor]:
         batches = []

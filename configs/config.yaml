@@ -39,7 +39,7 @@ model:
   n_heads: 6
   dropout: 0.1
   learning_rate: 0.0001
-  batch_size: 256
+  batch_size: 256  # ~1.6 GB peak on GTX 1070; throughput plateaus at ~1300 samples/s
   max_epochs: 50
   weight_decay: 0.0001
 
@@ -47,7 +47,12 @@ training:
   seeds: [42, 123, 456, 789, 1011]
   checkpoint_dir: results/checkpoints
   log_dir: results/runs
-  # steps_per_epoch: null  # default: full pass over training samples
+  gpu_resident_buffer: true   # trajectories live on GPU (~140 MB); false = CPU + per-batch copy
+  # A full pass is 3189 steps @ batch 256 (~10.4 min/epoch), which makes the
+  # 5-seed sweep ~150 h on a GTX 1070. 200 steps/epoch x 50 epochs still covers
+  # ~3 full passes of the 816k training samples and fits the sweep overnight.
+  steps_per_epoch: 200        # null = full pass
+  max_val_batches: 40         # null = all 354 val batches every epoch
 
 evaluation:
   risk_free_rate: 0.02

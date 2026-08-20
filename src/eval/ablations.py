@@ -21,12 +21,14 @@ def run_ablations(cfg: Config) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     ablation_results = {}
 
-    # 1. Context length K ablation
+    # 1. Context length K ablation (tagged so each K keeps its own checkpoint)
     k_results = []
     for K in cfg.get("ablations", "context_lengths", default=[10, 20, 30, 50]):
         cfg_k = deepcopy(cfg)
         cfg_k.raw.setdefault("model", {})["context_length"] = K
-        ckpt = train_dt(cfg_k, seed=42, use_rtg=True, context_length=K)
+        ckpt = train_dt(
+            cfg_k, seed=42, use_rtg=True, context_length=K, run_tag=f"_K{K}"
+        )
         k_results.append({"K": K, "checkpoint": str(ckpt)})
     ablation_results["context_length"] = k_results
 
