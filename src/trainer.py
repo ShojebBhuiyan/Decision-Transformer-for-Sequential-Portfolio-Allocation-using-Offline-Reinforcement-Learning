@@ -51,6 +51,12 @@ def train_dt(
     state_dim = dataset.states.shape[2]
     action_dim = dataset.actions.shape[2]
 
+    # Subsample for fast training on CPU if dataset is large
+    max_samples = int(cfg.get("model", "max_train_samples", default=0))
+    if max_samples > 0 and len(dataset) > max_samples:
+        indices = torch.randperm(len(dataset))[:max_samples].tolist()
+        dataset = torch.utils.data.Subset(dataset, indices)
+
     n_val = max(1, int(0.1 * len(dataset)))
     n_train = len(dataset) - n_val
     train_ds, val_ds = random_split(
@@ -94,6 +100,8 @@ def train_dt(
             target = batch["target_action"].to(device)
 
             pred = model(states, actions, rtg, mask)
+            pred = torch.nan_to_num(pred, nan=1.0 / action_dim)
+            pred = pred / (pred.sum(dim=-1, keepdim=True) + 1e-8)
             loss = torch.nn.functional.mse_loss(pred[:, -1, :], target)
 
             optimizer.zero_grad()
@@ -116,6 +124,8 @@ def train_dt(
                 mask = batch["mask"].to(device)
                 target = batch["target_action"].to(device)
                 pred = model(states, actions, rtg, mask)
+                pred = torch.nan_to_num(pred, nan=1.0 / action_dim)
+                pred = pred / (pred.sum(dim=-1, keepdim=True) + 1e-8)
                 loss = torch.nn.functional.mse_loss(pred[:, -1, :], target)
                 val_loss += loss.item()
                 n_val_batches += 1
@@ -123,6 +133,9 @@ def train_dt(
         train_loss /= max(n_batches, 1)
         val_loss /= max(n_val_batches, 1)
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
+
+        if epoch % 1 == 0:
+            print(f"  [{model_name}] epoch {epoch+1}/{max_epochs} train={train_loss:.5f} val={val_loss:.5f}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -156,6 +169,11 @@ def train_offline_rl(cfg: Config, algo: str, seed: int = 42) -> Path:
     batch_size = int(cfg.get("model", "batch_size", default=64))
     max_epochs = int(cfg.get("model", "max_epochs", default=50))
 
+    max_samples = int(cfg.get("model", "max_train_samples", default=0))
+    if max_samples > 0 and len(dataset) > max_samples:
+        indices = torch.randperm(len(dataset))[:max_samples].tolist()
+        dataset = torch.utils.data.Subset(dataset, indices)
+
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
     algo_map = {
@@ -187,6 +205,11 @@ def train_online_rl(cfg: Config, algo: str, seed: int = 42) -> Path:
     batch_size = int(cfg.get("model", "batch_size", default=64))
     max_epochs = int(cfg.get("model", "max_epochs", default=50))
 
+    max_samples = int(cfg.get("model", "max_train_samples", default=0))
+    if max_samples > 0 and len(dataset) > max_samples:
+        indices = torch.randperm(len(dataset))[:max_samples].tolist()
+        dataset = torch.utils.data.Subset(dataset, indices)
+
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
     algo_map = {"ppo": PPO, "sac": SAC, "a2c": A2C}
@@ -210,12 +233,23 @@ def train_all_models(cfg: Config) -> dict[str, Any]:
     results = {}
 
     for seed in seeds:
+        print(f"Training seed {seed}...")
         results[f"dt_seed{seed}"] = str(train_dt(cfg, seed=seed, use_rtg=True))
         results[f"bc_seed{seed}"] = str(train_dt(cfg, seed=seed, use_rtg=False))
         for algo in ("td3bc", "iql", "cql"):
-            results[f"{algo}_seed{seed}"] = str(train_offline_rl(cfg, algo, seed=seed))
+            print(f"  Training offline RL: {algo}")
+            try:
+                results[f"{algo}_seed{seed}"] = str(train_offline_rl(cfg, algo, seed=seed))
+            except Exception as e:
+                print(f"  WARNING: {algo} failed: {e}")
+                results[f"{algo}_seed{seed}"] = f"failed: {e}"
         for algo in ("ppo", "sac", "a2c"):
-            results[f"{algo}_seed{seed}"] = str(train_online_rl(cfg, algo, seed=seed))
+            print(f"  Training online RL: {algo}")
+            try:
+                results[f"{algo}_seed{seed}"] = str(train_online_rl(cfg, algo, seed=seed))
+            except Exception as e:
+                print(f"  WARNING: {algo} failed: {e}")
+                results[f"{algo}_seed{seed}"] = f"failed: {e}"
 
     out_path = cfg.project_root / "results" / "training_manifest.json"
     with open(out_path, "w", encoding="utf-8") as f:

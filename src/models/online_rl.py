@@ -33,6 +33,7 @@ class DirichletActor(nn.Module):
         if state.dim() == 3:
             state = state[:, -1, :]
         alpha = F.softplus(self.net(state)) + 1.0
+        alpha = torch.nan_to_num(alpha, nan=1.0).clamp(min=1e-3)
         return Dirichlet(alpha)
 
     def get_action(self, state: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
@@ -72,11 +73,11 @@ class PPO:
         states = batch["states"].to(self.device)
         actions = batch["target_action"].to(self.device)
         rewards = batch["rewards"][:, -1].to(self.device)
-        s = states[:, -1, :]
+        s = torch.nan_to_num(states[:, -1, :], nan=0.0)
 
         # Simplified PPO step (single-step for offline-compatible interface)
         dist = self.actor(s)
-        log_prob = dist.log_prob(actions.clamp(min=1e-8))
+        log_prob = dist.log_prob(actions / (actions.sum(dim=-1, keepdim=True) + 1e-8))
         value = self.critic(s).squeeze(-1)
         advantage = rewards - value.detach()
 
@@ -117,7 +118,7 @@ class SAC:
         states = batch["states"].to(self.device)
         actions = batch["target_action"].to(self.device)
         rewards = batch["rewards"][:, -1].to(self.device)
-        s = states[:, -1, :]
+        s = torch.nan_to_num(states[:, -1, :], nan=0.0)
 
         q = self.critic(torch.cat([s, actions], -1)).squeeze(-1)
         critic_loss = F.mse_loss(q, rewards)
@@ -152,12 +153,13 @@ class A2C:
         states = batch["states"].to(self.device)
         actions = batch["target_action"].to(self.device)
         rewards = batch["rewards"][:, -1].to(self.device)
-        s = states[:, -1, :]
+        s = torch.nan_to_num(states[:, -1, :], nan=0.0)
 
         value = self.critic(s).squeeze(-1)
         advantage = rewards - value.detach()
         pi_action = self.actor(states)
-        actor_loss = -(advantage * F.log_softmax(pi_action, dim=-1) * actions).sum(-1).mean()
+        log_pi = torch.log(pi_action + 1e-8)
+        actor_loss = -(advantage * (actions * log_pi).sum(-1)).mean()
         critic_loss = F.mse_loss(value, rewards)
 
         self.actor_opt.zero_grad()

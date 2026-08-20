@@ -143,13 +143,13 @@ def generate_trajectories(cfg: Config) -> Path:
     out_path = output_dir / "trajectories.npz"
     np.savez_compressed(
         out_path,
-        states=states_arr,
-        actions=actions_arr,
-        rewards=rewards_arr,
-        rtg=rtg_arr,
+        states=states_arr.astype(np.float16),
+        actions=actions_arr.astype(np.float16),
+        rewards=rewards_arr.astype(np.float32),
+        rtg=rtg_arr.astype(np.float32),
         lengths=lengths,
-        rtg_mean=rtg_mean,
-        rtg_std=rtg_std,
+        rtg_mean=np.float32(rtg_mean),
+        rtg_std=np.float32(rtg_std),
     )
 
     meta = {
@@ -178,8 +178,8 @@ class TrajectoryDataset(Dataset):
         normalize_rtg: bool = True,
     ):
         data = np.load(traj_path)
-        self.states = data["states"]
-        self.actions = data["actions"]
+        self.states = data["states"].astype(np.float32)
+        self.actions = data["actions"].astype(np.float32)
         self.rewards = data["rewards"]
         self.rtg = data["rtg"]
         self.lengths = data["lengths"]

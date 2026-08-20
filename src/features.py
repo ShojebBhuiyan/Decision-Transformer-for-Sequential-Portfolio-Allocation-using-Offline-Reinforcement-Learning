@@ -178,17 +178,21 @@ def compute_norm_stats(states: np.ndarray, train_mask: np.ndarray) -> dict[str, 
 
 
 def normalize_states(states: np.ndarray, norm_stats: dict[str, np.ndarray]) -> np.ndarray:
-    return ((states - norm_stats["mean"]) / norm_stats["std"]).astype(np.float32)
+    normalized = (states - norm_stats["mean"]) / norm_stats["std"]
+    return np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
 
 def build_features(
     bundle: MarketDataBundle,
     cfg: Config,
-    include_indicators: bool = True,
+    include_indicators: bool | None = None,
     include_macro: bool = True,
     include_events: bool = True,
 ) -> FeatureBundle:
     """Full feature pipeline."""
+    feature_set = cfg.get("data", "feature_set", default="full")
+    if include_indicators is None:
+        include_indicators = feature_set != "minimal"
     lookback = int(cfg.get("data", "lookback", default=20))
     n_assets = len(bundle.universe)
 

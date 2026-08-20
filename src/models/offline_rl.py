@@ -77,7 +77,7 @@ class TD3BC:
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
 
     def train_step(self, batch: dict) -> dict:
-        states = batch["states"].to(self.device)
+        states = torch.nan_to_num(batch["states"].to(self.device), nan=0.0)
         actions = batch["target_action"].to(self.device)
         rewards = batch["rewards"][:, -1].to(self.device)
         next_states = states  # simplified: same episode context
@@ -143,7 +143,7 @@ class IQL:
         return (weight * diff.pow(2)).mean()
 
     def train_step(self, batch: dict) -> dict:
-        states = batch["states"].to(self.device)
+        states = torch.nan_to_num(batch["states"].to(self.device), nan=0.0)
         actions = batch["target_action"].to(self.device)
         rewards = batch["rewards"][:, -1].to(self.device)
         s = states[:, -1, :]
@@ -206,7 +206,7 @@ class CQL:
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
 
     def train_step(self, batch: dict) -> dict:
-        states = batch["states"].to(self.device)
+        states = torch.nan_to_num(batch["states"].to(self.device), nan=0.0)
         actions = batch["target_action"].to(self.device)
         rewards = batch["rewards"][:, -1].to(self.device)
 
