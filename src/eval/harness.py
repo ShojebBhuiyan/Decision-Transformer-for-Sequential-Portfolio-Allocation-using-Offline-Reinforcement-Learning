@@ -173,6 +173,26 @@ def aggregate_learned_metrics(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def fold_is_in_sample(start: str, train_end: str) -> bool:
+    """True when the fold begins on or before the training cutoff."""
+    return pd.Timestamp(start) <= pd.Timestamp(train_end)
+
+
+def aggregate_walkforward_learned(df: pd.DataFrame) -> pd.DataFrame:
+    """Mean ± std across seeds per strategy and walk-forward fold."""
+    if df.empty:
+        return df
+    keys = ["strategy", "fold", "period", "in_sample"]
+    metric_cols = [
+        c for c in df.columns
+        if c not in keys + ["seed"] and np.issubdtype(df[c].dtype, np.number)
+    ]
+    mean = df.groupby(keys, as_index=False)[metric_cols].mean()
+    std = df.groupby(keys, as_index=False)[metric_cols].std(ddof=0)
+    std = std.rename(columns={c: f"{c}_std" for c in metric_cols})
+    return mean.merge(std, on=keys)
+
+
 def run_evaluation(cfg: Config) -> pd.DataFrame:
     """Run headline holdout evaluation."""
     bundle = load_processed_data(cfg)
@@ -215,7 +235,10 @@ def run_evaluation(cfg: Config) -> pd.DataFrame:
             df["period"] = f"{start}_{end}"
             wf_results.append(df)
 
-    # Learned models on the headline test split
+    # Learned models on the headline test split (load checkpoints once)
+    learned_policies = load_learned_policies(
+        cfg, state_dim=fb.states.shape[1], action_dim=returns_aligned.shape[1]
+    )
     learned_df, learned_series = evaluate_learned_series(
         cfg,
         returns_aligned,
@@ -225,7 +248,22 @@ def run_evaluation(cfg: Config) -> pd.DataFrame:
         test_end,
         tc,
         rf,
+        policies=learned_policies,
     )
+
+    train_end = cfg.get("splits", "train_end")
+    wf_learned = []
+    if learned_policies:
+        for i, (start, end) in enumerate(WALK_FORWARD_FOLDS):
+            df = evaluate_learned(
+                cfg, returns_aligned, fb.states, fb.dates, start, end, tc, rf,
+                policies=learned_policies,
+            )
+            if not df.empty:
+                df["fold"] = i
+                df["period"] = f"{start}_{end}"
+                df["in_sample"] = fold_is_in_sample(start, train_end)
+                wf_learned.append(df)
 
     # Save results
     out_dir = cfg.tables_dir()
@@ -260,6 +298,12 @@ def run_evaluation(cfg: Config) -> pd.DataFrame:
         wf_df = pd.concat(wf_results)
         wf_df.to_csv(out_dir / "walkforward_metrics.csv")
 
+    if wf_learned:
+        wf_learned_df = aggregate_walkforward_learned(pd.concat(wf_learned, ignore_index=True))
+        wf_learned_df.to_csv(out_dir / "walkforward_learned_metrics.csv", index=False)
+    else:
+        wf_learned_df = pd.DataFrame()
+
     summary = {
         "test_sharpe": test_df["sharpe"].to_dict() if not test_df.empty else {},
         "learned_sharpe_mean": (
@@ -270,6 +314,7 @@ def run_evaluation(cfg: Config) -> pd.DataFrame:
         ),
         "n_folds": len(wf_results),
         "n_learned_rows": int(len(learned_df)),
+        "n_walkforward_learned_rows": int(len(wf_learned_df)),
         "n_rtg_calibration_rows": int(len(cal_df)),
         "n_significance_rows": int(len(sig)),
     }
