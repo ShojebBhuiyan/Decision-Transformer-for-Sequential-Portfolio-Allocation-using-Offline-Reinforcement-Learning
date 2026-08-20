@@ -222,22 +222,46 @@ def train_online_rl(cfg: Config, algo: str, seed: int = 42) -> Path:
     return _train_agent(cfg, algo, {"ppo": PPO, "sac": SAC, "a2c": A2C}, seed)
 
 
+def _checkpoint_path_for_manifest_key(cfg: Config, key: str) -> Path:
+    algo, seed = key.rsplit("_seed", 1)
+    name = "bc_transformer" if algo == "bc" else algo
+    return cfg.checkpoint_dir() / f"{name}_seed{seed}.pt"
+
+
 def train_all_models(cfg: Config) -> dict[str, Any]:
     """Train all models across seeds, persisting progress after each model."""
     seeds = cfg.get("training", "seeds", default=[42])
+    force = bool(cfg.get("training", "force_retrain", default=False))
     out_path = cfg.training_manifest_path()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     results: dict[str, Any] = {}
+    if out_path.exists():
+        with open(out_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            results = loaded
+
+    def _write() -> None:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2)
 
     def _record(key: str, fn) -> None:
+        ckpt = _checkpoint_path_for_manifest_key(cfg, key)
+        prev = results.get(key, "")
+        ok_manifest = isinstance(prev, str) and prev and not prev.startswith("failed:")
+        if not force and ckpt.exists() and ok_manifest:
+            print(f"  skip {key} (checkpoint exists)")
+            results[key] = str(ckpt)
+            _write()
+            return
         try:
             results[key] = str(fn())
         except Exception as e:  # keep the sweep alive and record the reason
             print(f"  WARNING: {key} failed: {e}")
             results[key] = f"failed: {type(e).__name__}: {e}"
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2)
+        _write()
 
+    n_algos = 8
     for seed in seeds:
         print(f"Training seed {seed}...")
         _record(f"dt_seed{seed}", lambda: train_dt(cfg, seed=seed, use_rtg=True))
@@ -249,4 +273,8 @@ def train_all_models(cfg: Config) -> dict[str, Any]:
             print(f"  Training online RL: {algo}")
             _record(f"{algo}_seed{seed}", lambda a=algo: train_online_rl(cfg, a, seed=seed))
 
+    n_expected = len(seeds) * n_algos
+    n_ok = sum(1 for v in results.values() if isinstance(v, str) and not v.startswith("failed:"))
+    n_fail = sum(1 for v in results.values() if isinstance(v, str) and v.startswith("failed:"))
+    print(f"Sweep complete: {n_ok} of {n_expected} succeeded ({n_fail} failed).")
     return results

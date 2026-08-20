@@ -53,6 +53,7 @@ training:
   # ~3 full passes of the 816k training samples and fits the sweep overnight.
   steps_per_epoch: 200        # null = full pass
   max_val_batches: 40         # null = all 354 val batches every epoch
+  force_retrain: false        # true = ignore existing checkpoints when resuming a sweep
 
 evaluation:
   risk_free_rate: 0.02
