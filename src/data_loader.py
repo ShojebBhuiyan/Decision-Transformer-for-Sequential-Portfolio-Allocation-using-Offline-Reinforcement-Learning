@@ -171,6 +171,19 @@ def get_universe_start_date(universe_key: str) -> str:
     return "2000-09-01"
 
 
+def universe_b_config(cfg: Config) -> Config:
+    """Copy of ``cfg`` pointed at Universe B with scoped artifact paths."""
+    from copy import deepcopy
+
+    raw = deepcopy(cfg.raw)
+    data = raw.setdefault("data", {})
+    data["universe"] = "B"
+    data["start_date"] = get_universe_start_date("B")
+    splits = raw.setdefault("splits", {})
+    splits["train_start"] = data["start_date"]
+    return Config(raw=raw)
+
+
 def load_market_data(cfg: Config) -> MarketDataBundle:
     """Full data loading pipeline."""
     root = _project_root(cfg)
@@ -231,9 +244,8 @@ def load_market_data(cfg: Config) -> MarketDataBundle:
 
 
 def save_processed_data(bundle: MarketDataBundle, cfg: Config) -> Path:
-    """Persist processed data to data/processed/."""
-    root = _project_root(cfg)
-    out_dir = root / "data" / "processed"
+    """Persist processed data to data/processed/ (scoped per universe)."""
+    out_dir = cfg.processed_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     bundle.investable_prices.to_parquet(out_dir / "investable_prices.parquet")
@@ -253,9 +265,8 @@ def save_processed_data(bundle: MarketDataBundle, cfg: Config) -> Path:
 
 def load_processed_data(cfg: Config) -> MarketDataBundle:
     """Load previously processed data."""
-    root = _project_root(cfg)
-    out_dir = root / "data" / "processed"
-    dataset_dir = root / cfg.get("data", "dataset_dir", default="dataset")
+    out_dir = cfg.processed_dir()
+    dataset_dir = _project_root(cfg) / cfg.get("data", "dataset_dir", default="dataset")
 
     investable = pd.read_parquet(out_dir / "investable_prices.parquet")
     features = pd.read_parquet(out_dir / "feature_prices.parquet")

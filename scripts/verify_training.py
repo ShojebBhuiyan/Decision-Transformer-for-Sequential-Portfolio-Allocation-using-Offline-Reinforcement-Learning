@@ -38,7 +38,7 @@ def main() -> int:
         print(f"TRAINING FAILURES: {failures}")
         return 1
 
-    ckpt_dir = cfg.project_root / "results" / "checkpoints"
+    ckpt_dir = cfg.checkpoint_dir()
     problems: list[str] = []
 
     for name, path in results.items():
@@ -70,7 +70,7 @@ def main() -> int:
 
     # Every history log should exist and cover all epochs
     for stem in ("dt", "bc_transformer"):
-        log = cfg.project_root / "results" / "runs" / f"{stem}_seed42_history.csv"
+        log = cfg.run_dir() / f"{stem}_seed42_history.csv"
         rows = log.read_text().strip().splitlines()
         if len(rows) != 3:
             problems.append(f"{log.name}: expected 3 lines, got {len(rows)}")

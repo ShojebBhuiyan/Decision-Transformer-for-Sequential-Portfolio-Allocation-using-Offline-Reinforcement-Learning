@@ -17,7 +17,7 @@ from src.trainer import train_dt
 
 def run_ablations(cfg: Config) -> dict:
     """Run ablation suite and save results."""
-    out_dir = cfg.project_root / "results" / "tables"
+    out_dir = cfg.tables_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     ablation_results = {}
 
@@ -69,15 +69,11 @@ def run_ablations(cfg: Config) -> dict:
         tc_df.to_csv(out_dir / "ablation_transaction_cost.csv")
         ablation_results["transaction_cost"] = tc_df.to_dict()
 
-    # 4. Universe B robustness (if not already on B)
+    # 4. Universe B robustness (scoped artifacts; does not clobber A)
     if cfg.get("data", "universe", default="A") == "A":
-        cfg_b = deepcopy(cfg)
-        cfg_b.raw.setdefault("data", {})["universe"] = "B"
-        cfg_b.raw["data"]["start_date"] = "2014-09-17"
-        ablation_results["universe_b"] = {
-            "note": "Universe B requires re-running prepare stage with data.universe=B",
-            "config": cfg_b.raw["data"],
-        }
+        from src.eval.universe_b import run_universe_b_classical
+
+        ablation_results["universe_b"] = run_universe_b_classical(cfg, generate_traj=True)
 
     # Save ablation manifest
     manifest_path = out_dir / "ablation_manifest.json"

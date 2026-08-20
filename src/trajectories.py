@@ -159,7 +159,7 @@ def generate_trajectories(cfg: Config) -> Path:
     reward_epsilon = float(cfg.get("env", "reward_epsilon", default=1e-8))
     episode_length = int(cfg.get("env", "episode_length", default=252))
     n_windows = int(cfg.get("trajectories", "n_windows_per_policy", default=200))
-    output_dir = cfg.project_root / cfg.get("trajectories", "output_dir", default="data/trajectories")
+    output_dir = cfg.trajectories_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     train_mask = get_split_mask(
@@ -376,8 +376,7 @@ class GPUTrajectoryBuffer:
         if gpu_resident is None:
             gpu_resident = bool(cfg.get("training", "gpu_resident_buffer", default=False))
 
-        root = cfg.project_root
-        traj_path = root / cfg.get("trajectories", "output_dir", default="data/trajectories") / "trajectories.npz"
+        traj_path = cfg.trajectories_dir() / "trajectories.npz"
         data = _load_trajectory_npz(traj_path)
 
         storage = device if gpu_resident else "cpu"
@@ -517,7 +516,6 @@ class GPUTrajectoryBuffer:
 
 
 def load_trajectory_dataset(cfg: Config, split: str = "train") -> TrajectoryDataset:
-    root = cfg.project_root
-    traj_path = root / cfg.get("trajectories", "output_dir", default="data/trajectories") / "trajectories.npz"
+    traj_path = cfg.trajectories_dir() / "trajectories.npz"
     K = int(cfg.get("model", "context_length", default=30))
     return TrajectoryDataset(traj_path, context_length=K)

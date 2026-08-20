@@ -196,8 +196,7 @@ def _feature_fingerprint(cfg: Config) -> dict[str, Any]:
 
 def build_or_load_features(bundle: MarketDataBundle, cfg: Config) -> FeatureBundle:
     """Build features or load cached states.npy when fingerprint matches."""
-    root = cfg.project_root
-    out_dir = root / "data" / "processed"
+    out_dir = cfg.processed_dir()
     meta_path = out_dir / "feature_meta.json"
     states_path = out_dir / "states.npy"
     fingerprint = _feature_fingerprint(cfg)
@@ -253,8 +252,7 @@ def build_features(
 
 
 def save_features(fb: FeatureBundle, cfg: Config) -> Path:
-    root = cfg.project_root
-    out_dir = root / "data" / "processed"
+    out_dir = cfg.processed_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     np.save(out_dir / "states.npy", fb.states)
@@ -278,8 +276,7 @@ def save_features(fb: FeatureBundle, cfg: Config) -> Path:
 
 
 def load_features(cfg: Config) -> FeatureBundle:
-    root = cfg.project_root
-    out_dir = root / "data" / "processed"
+    out_dir = cfg.processed_dir()
 
     states = np.load(out_dir / "states.npy")
     dates = pd.read_parquet(out_dir / "state_dates.parquet")["date"]

@@ -148,9 +148,9 @@ def plot_rtg_calibration(df: pd.DataFrame, out_path: Path) -> None:
 def save_rtg_calibration(cfg: Config, df: pd.DataFrame) -> Path | None:
     if df.empty:
         return None
-    tables = cfg.project_root / "results" / "tables"
+    tables = cfg.tables_dir()
     tables.mkdir(parents=True, exist_ok=True)
     csv_path = tables / "rtg_calibration.csv"
     df.to_csv(csv_path, index=False)
-    plot_rtg_calibration(df, cfg.project_root / "results" / "figures" / "eval" / "rtg_calibration.png")
+    plot_rtg_calibration(df, cfg.figures_eval_dir() / "rtg_calibration.png")
     return csv_path

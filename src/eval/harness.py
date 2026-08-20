@@ -228,7 +228,7 @@ def run_evaluation(cfg: Config) -> pd.DataFrame:
     )
 
     # Save results
-    out_dir = cfg.project_root / "results" / "tables"
+    out_dir = cfg.tables_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     test_df = results.get("test", pd.DataFrame())

@@ -62,9 +62,7 @@ def assert_checkpoint_dims(
 
 
 def trajectory_dir(cfg: Config) -> Path:
-    return cfg.project_root / cfg.get(
-        "trajectories", "output_dir", default="data/trajectories"
-    )
+    return cfg.trajectories_dir()
 
 
 def load_rtg_stats(cfg: Config) -> tuple[float, float]:
@@ -104,7 +102,7 @@ def default_target_rtg(cfg: Config) -> float:
 
 
 def load_manifest(cfg: Config) -> dict[str, str]:
-    path = cfg.project_root / "results" / "training_manifest.json"
+    path = cfg.training_manifest_path()
     if not path.exists():
         return {}
     with open(path, "r", encoding="utf-8") as f:

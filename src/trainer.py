@@ -103,9 +103,9 @@ def train_dt(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
 
-    ckpt_dir = cfg.project_root / cfg.get("training", "checkpoint_dir", default="results/checkpoints")
+    ckpt_dir = cfg.checkpoint_dir()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    log_dir = cfg.project_root / cfg.get("training", "log_dir", default="results/runs")
+    log_dir = cfg.run_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
 
     ckpt_path = ckpt_dir / f"{model_name}_seed{seed}.pt"
@@ -186,7 +186,7 @@ def _train_agent(
     buffer = GPUTrajectoryBuffer(cfg, device, last_state_only=True, seed=seed)
     agent = algo_map[algo](buffer.state_dim, buffer.n_assets, device=device)
 
-    ckpt_dir = cfg.project_root / cfg.get("training", "checkpoint_dir", default="results/checkpoints")
+    ckpt_dir = cfg.checkpoint_dir()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = ckpt_dir / f"{algo}_seed{seed}.pt"
 
@@ -225,7 +225,7 @@ def train_online_rl(cfg: Config, algo: str, seed: int = 42) -> Path:
 def train_all_models(cfg: Config) -> dict[str, Any]:
     """Train all models across seeds, persisting progress after each model."""
     seeds = cfg.get("training", "seeds", default=[42])
-    out_path = cfg.project_root / "results" / "training_manifest.json"
+    out_path = cfg.training_manifest_path()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     results: dict[str, Any] = {}
 

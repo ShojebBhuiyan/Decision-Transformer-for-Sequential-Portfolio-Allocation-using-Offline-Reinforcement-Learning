@@ -337,8 +337,8 @@ def precompute_all_schedules(
 
     if cfg is not None:
         fingerprint = _policy_weights_fingerprint(cfg, n_assets, n_dates)
-        cache_path = cfg.project_root / "data" / "processed" / "policy_weights.npz"
-        meta_path = cfg.project_root / "data" / "processed" / "policy_weights_meta.json"
+        cache_path = cfg.processed_dir() / "policy_weights.npz"
+        meta_path = cfg.processed_dir() / "policy_weights_meta.json"
         if cache_path.exists() and meta_path.exists():
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
@@ -363,7 +363,7 @@ def precompute_all_schedules(
     if cfg is not None and cache_path is not None and fingerprint is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(cache_path, **schedules)
-        with open(cfg.project_root / "data" / "processed" / "policy_weights_meta.json", "w") as f:
+        with open(cfg.processed_dir() / "policy_weights_meta.json", "w") as f:
             json.dump({"fingerprint": fingerprint, "keys": list(schedules.keys())}, f, indent=2)
 
     return schedules
