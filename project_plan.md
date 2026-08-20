@@ -9,8 +9,22 @@ Last updated: 2026-08-20
 
 Frame multi-asset portfolio allocation as an offline sequence-modeling problem using a **Decision Transformer (DT)**. Train on synthesized trajectories from 30 years of daily close prices, conditioned on Return-to-Go (RTG). Benchmark against classical strategies, Behavior Cloning, offline RL (CQL, IQL, TD3+BC), and online RL (PPO, SAC, A2C).
 
-**Hardware:** NVIDIA GTX 1070 (8 GB), Python 3.11  
+**Hardware:** NVIDIA GTX 1070 (8 GB), Python 3.11, CUDA PyTorch  
 **Stack:** PyTorch (custom in-repo implementations only; no FinRL / d3rlpy / stable-baselines3)
+
+---
+
+## 2a. GPU pipeline optimization (2026-08-21)
+
+Three CPU bottlenecks were removed so training is GPU-bound rather than DataLoader-bound:
+
+1. **Precomputed behavior-policy schedules** — deterministic policies (`MeanVariance`, `Momentum`, etc.) precompute `(T, N)` weight tables once; LedoitWolf stays per-date but gradient steps are batched. Cached at `data/processed/policy_weights.npz`.
+2. **Trajectory format v2** — global `states (n_dates, state_dim)` + `episode_starts` replaces duplicated `(n_episodes, 252, state_dim)` (~9.4 GB → ~65 MB).
+3. **GPU-resident batch sampler** — `GPUTrajectoryBuffer` uploads arrays once and gathers batches on-device; `last_state_only` mode for offline/online RL agents.
+
+Additional fixes: attention padding mask NaN bug (diagonal always attendable); RTG stats masked by `lengths`; fingerprinted feature cache; `batch_size: 256`, `cudnn.benchmark=True`. **AMP deliberately skipped** on Pascal (GTX 1070, compute 6.1, no tensor cores).
+
+**Re-run required:** `python main.py --stage trajectories` after pulling (format v2 breaks v1 files).
 
 ---
 
@@ -207,6 +221,14 @@ portfolio_dt/
 | 12 | Ablation runs | (in ae222ba) | done |
 | 13 | Paper, plots notebook, README | `docs(report): paper and results` (ae222ba) | done |
 | 14 | `implementation_summary.md` | `docs: implementation summary` (f099ff2) | done |
+| 15 | Batched simplex projection | `perf(env): add batched simplex projection` | done |
+| 16 | Precomputed policy schedules + cache | `perf(policies): precompute and cache behavior weight schedules` | done |
+| 17 | Vectorized rollouts + format v2 | `perf(trajectories): vectorize rollouts and add format v2` | done |
+| 18 | Attention padding NaN fix | `fix(model): correct attention padding mask producing NaN` | done |
+| 19 | GPU batch sampler + training tuning | `perf(train): GPU-resident batch sampler and loop tuning` | done |
+| 20 | Fingerprinted feature cache | `perf(features): fingerprinted feature cache` | done |
+| 21 | Optimization regression tests | `test: equivalence and regression coverage for optimizations` | done |
+| 22 | Optimization docs | `docs: record optimization architecture and revised runtimes` | done |
 
 ---
 

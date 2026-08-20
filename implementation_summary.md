@@ -1,8 +1,8 @@
 # Implementation Summary
 
 **Project:** Decision Transformer for Sequential Portfolio Allocation  
-**Date:** 2026-08-20  
-**Status:** Initial implementation complete; ready for GPU-scale experiments
+**Date:** 2026-08-21  
+**Status:** GPU-optimized pipeline ready for full-scale experiments
 
 ---
 
@@ -15,21 +15,61 @@ A full offline RL research pipeline in `F:\Research\RL\` framing multi-asset por
 | Path | Purpose |
 |------|---------|
 | [`src/data_loader.py`](src/data_loader.py) | CSV loading, NYSE calendar alignment, Universe A/B, synthetic bond & cash |
-| [`src/features.py`](src/features.py) | State engineering (`minimal` or `full` feature sets) |
-| [`src/env.py`](src/env.py) | Portfolio environment with log reward & turnover cost |
-| [`src/policies.py`](src/policies.py) | Classical + noisy behavior policies |
-| [`src/trajectories.py`](src/trajectories.py) | Offline trajectory synthesis & PyTorch Dataset |
-| [`src/models/decision_transformer.py`](src/models/decision_transformer.py) | Causal GPT Decision Transformer |
+| [`src/features.py`](src/features.py) | State engineering with fingerprinted cache (`build_or_load_features`) |
+| [`src/env.py`](src/env.py) | Portfolio environment with log reward & batched simplex projection |
+| [`src/policies.py`](src/policies.py) | Classical + noisy behavior policies with precomputed schedules |
+| [`src/trajectories.py`](src/trajectories.py) | Format v2 trajectories, vectorized rollouts, `GPUTrajectoryBuffer` |
+| [`src/models/decision_transformer.py`](src/models/decision_transformer.py) | Causal GPT Decision Transformer (fixed attention masking) |
 | [`src/models/bc.py`](src/models/bc.py) | Transformer BC + MLP-BC |
 | [`src/models/offline_rl.py`](src/models/offline_rl.py) | TD3+BC, IQL, CQL |
 | [`src/models/online_rl.py`](src/models/online_rl.py) | PPO, SAC, A2C (reference; uses interaction) |
-| [`src/trainer.py`](src/trainer.py) | Training loops with checkpointing |
+| [`src/trainer.py`](src/trainer.py) | GPU-resident training loops with checkpointing |
 | [`src/eval/`](src/eval/) | Backtest, metrics, stats, harness, ablations |
-| [`configs/config.yaml`](configs/config.yaml) | Default hyperparameters |
+| [`configs/config.yaml`](configs/config.yaml) | Default hyperparameters (`batch_size: 256`) |
 | [`main.py`](main.py) | Pipeline entrypoint |
 | [`notebooks/`](notebooks/) | EDA and evaluation notebooks |
 | [`paper/main.tex`](paper/main.tex) | LaTeX paper draft |
-| [`tests/`](tests/) | 19 unit tests (all passing) |
+| [`tests/`](tests/) | 27 unit tests (all passing) |
+
+---
+
+## GPU Pipeline Optimization
+
+### Trajectory format v2
+
+| Field | Shape | Notes |
+|-------|-------|-------|
+| `states` | `(n_dates, state_dim)` | Global state matrix (shared across episodes) |
+| `episode_starts` | `(n_episodes,)` | Index into `states` for each episode |
+| `actions`, `rewards`, `rtg` | `(n_episodes, L, …)` | Per-episode sequences |
+| `format_version` | `2` | v1 files must be regenerated |
+
+### Data flow
+
+1. **Policy schedules** precomputed once → cached at `data/processed/policy_weights.npz`
+2. **Vectorized rollout** — episode rewards/RTG from precomputed weights (no per-day policy calls)
+3. **Feature cache** — `states.npy` reused when fingerprint matches config
+4. **GPUTrajectoryBuffer** — all tensors on device; batches built by index gather
+5. **`last_state_only`** — TD3+BC, IQL, CQL, PPO, SAC, A2C skip K-context gather
+
+### Attention correctness fix
+
+**Before:** Right-aligned padding could mask all keys for a query row → softmax NaN → `nan_to_num` band-aid in trainer.  
+**After:** Causal + padding mask combined; diagonal always attendable; `scaled_dot_product_attention`; no `nan_to_num` in trainer.
+
+### AMP skipped on Pascal
+
+GTX 1070 (compute 6.1) has no tensor cores and ~1/64 fp16 throughput vs fp32 on GP104. Mixed precision would likely slow training, so it is intentionally disabled.
+
+### Revised runtime expectations
+
+| Stage | Before (CPU-bound) | After (optimized) |
+|-------|-------------------|-------------------|
+| Trajectory generation | Tens of minutes | Few minutes |
+| Training GPU utilization | 3–4% | GPU compute-bound |
+| Full sweep (5 seeds × 8 models × 50 epochs) | N/A | Multi-hour to overnight |
+
+Use `training.steps_per_epoch` to bound training runtime without code changes.
 
 ---
 
@@ -52,13 +92,15 @@ pytest tests/ -q
 
 ```bash
 python main.py --stage prepare      # Load & process market data
-python main.py --stage trajectories # Synthesize offline trajectories (~2-5 min)
-python main.py --stage train        # Train DT, BC, offline/online RL (~10 min CPU)
+python main.py --stage trajectories # Synthesize offline trajectories (format v2, ~few min)
+python main.py --stage train        # Train DT, BC, offline/online RL (GPU-bound)
 python main.py --stage evaluate     # Backtest classical baselines
 python main.py --stage ablations    # Transaction cost sweep + ablation manifest
 ```
 
 Or run everything: `python main.py --stage all`
+
+**Note:** After upgrading to format v2, delete old `data/trajectories/trajectories.npz` and re-run `--stage trajectories`.
 
 ### 3. Notebooks & figures
 
@@ -86,62 +128,45 @@ cd paper && pdflatex main.tex
 | Min-Variance | 23.6% | 1.12 | -23.3% | ~0 |
 | Risk Parity | 0.6% | -0.18 | -23.3% | 0.14% |
 
-**Decision Transformer:** Trained successfully (val MSE ≈ 0.009, 3 epochs CPU). Checkpoint: `results/checkpoints/dt_seed42.pt`
-
 Results tables: `results/tables/headline_test_metrics.csv`, `walkforward_metrics.csv`
-
----
-
-## Deviations from project_plan.md
-
-| Planned | Actual | Reason |
-|---------|--------|--------|
-| CUDA PyTorch cu118 | CPU PyTorch 2.13 | 2.8 GB CUDA wheel download timed out twice |
-| `feature_set: full`, lookback 20 | `minimal`, lookback 10 | Full features (2580-dim) too slow on CPU |
-| 5 seeds, 50 epochs | 1 seed, 3 epochs | Practical CPU runtime limits |
-| 200 windows/policy | 30 windows/policy | Trajectory generation time |
-| Full K/RTG ablation retraining | Transaction cost sweep + manifest | Ablation retraining ~15+ min per K value |
-| PPO/SAC/A2C all working | PPO fails (Dirichlet NaN), A2C fixed | State NaN edge cases in online RL |
 
 ---
 
 ## Known Limitations
 
 1. **Close-only data** — no volume, no intraday features.
-2. **CPU training** — subsampled trajectories (`max_train_samples: 8000`), reduced epochs.
-3. **WTI negative price** (2020-04-20) — used as feature only, not investable.
-4. **Online RL caveat** — PPO/SAC/A2C interact with environment; not fair offline comparison.
-5. **Risk parity underperformance** — may need tuning of lookback window.
+2. **WTI negative price** (2020-04-20) — used as feature only, not investable.
+3. **Online RL caveat** — PPO/SAC/A2C interact with environment; not fair offline comparison.
+4. **Risk parity underperformance** — may need tuning of lookback window.
+5. **Noisy policy RNG** — vectorized Dirichlet (gamma trick) is statistically equivalent but not bit-identical to per-day `rng.dirichlet`.
 6. **Generated data artifacts** — `data/processed/`, `data/trajectories/`, `results/checkpoints/` are gitignored; must re-run pipeline on fresh clone.
 
 ---
 
 ## Prioritized Next Steps
 
-1. **Install CUDA PyTorch** and retrain with `feature_set: full`, 5 seeds, 50 epochs.
+1. **Run full training sweep** — 5 seeds × 8 models × 50 epochs with format v2 trajectories.
 2. **DT inference loop** — implement RTG-conditioned rollout on test period and add to evaluation harness.
 3. **RTG calibration curve** — sweep target RTG quantiles, plot realized vs. target return.
 4. **Universe B** — set `data.universe: B`, `start_date: 2014-09-17`, re-run pipeline.
 5. **Statistical tests** — wire `src/eval/stats.py` into harness (block-bootstrap CIs, deflated Sharpe).
 6. **Fix PPO** — investigate Dirichlet NaN from state distribution; add gradient clipping.
-7. **Increase trajectory count** — restore `n_windows_per_policy: 200` on GPU.
-8. **Walk-forward DT evaluation** — load checkpoints per fold, report mean ± std across seeds.
+7. **Walk-forward DT evaluation** — load checkpoints per fold, report mean ± std across seeds.
 
 ---
 
-## Git Commit History (logical steps)
+## Git Commit History (GPU optimization)
 
 | Step | Commit message |
 |------|----------------|
-| 0 | `docs: add project plan` |
-| 1 | `chore(setup): scaffold project with src, tests, configs` |
-| 2 | `feat(data): verify market data loader on Universe A` |
-| 3 | `docs(eda): data exploration notebook and EDA figures` |
-| 7 | `feat(trajectories): generate offline trajectory dataset` |
-| 8-10 | `feat(models): train DT, BC, and offline RL baselines` |
-| 11+ | `feat(eval): evaluation harness and ablations` (pending) |
-| 13 | `docs(report): paper and results` (pending) |
-| 14 | `docs: implementation summary` (this commit) |
+| 1 | `perf(env): add batched simplex projection` |
+| 2 | `perf(policies): precompute and cache behavior weight schedules` |
+| 3 | `perf(trajectories): vectorize rollouts and add format v2` |
+| 4 | `fix(model): correct attention padding mask producing NaN` |
+| 5 | `perf(train): GPU-resident batch sampler and loop tuning` |
+| 6 | `perf(features): fingerprinted feature cache` |
+| 7 | `test: equivalence and regression coverage for optimizations` |
+| 8 | `docs: record optimization architecture and revised runtimes` |
 
 ---
 
