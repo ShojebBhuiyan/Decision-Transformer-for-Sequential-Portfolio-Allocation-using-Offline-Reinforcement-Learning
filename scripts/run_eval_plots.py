@@ -77,6 +77,14 @@ def main():
         fig.savefig(OUT / "walkforward_sharpe.png", dpi=120)
         plt.close()
 
+    # RTG calibration
+    cal_path = TABLES / "rtg_calibration.csv"
+    if cal_path.exists():
+        from src.eval.rtg_calibration import plot_rtg_calibration
+
+        cal = pd.read_csv(cal_path)
+        plot_rtg_calibration(cal, OUT / "rtg_calibration.png")
+
     print(f"Evaluation figures saved to {OUT}")
 
 

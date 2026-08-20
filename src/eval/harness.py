@@ -17,6 +17,7 @@ from src.eval.model_policy import (
     load_learned_policies,
     parse_manifest_key,
 )
+from src.eval.rtg_calibration import run_rtg_calibration, save_rtg_calibration
 from src.features import build_features, load_features
 from src.policies import Policy, get_classical_baselines
 
@@ -199,6 +200,12 @@ def run_evaluation(cfg: Config) -> pd.DataFrame:
     if not headline.empty:
         headline.to_csv(out_dir / "headline_test_metrics.csv")
 
+    cal_df = run_rtg_calibration(
+        cfg, returns_aligned, fb.states, fb.dates,
+        cfg.get("splits", "test_start"), cfg.get("splits", "test_end"), tc,
+    )
+    save_rtg_calibration(cfg, cal_df)
+
     if wf_results:
         wf_df = pd.concat(wf_results)
         wf_df.to_csv(out_dir / "walkforward_metrics.csv")
@@ -213,6 +220,7 @@ def run_evaluation(cfg: Config) -> pd.DataFrame:
         ),
         "n_folds": len(wf_results),
         "n_learned_rows": int(len(learned_df)),
+        "n_rtg_calibration_rows": int(len(cal_df)),
     }
     with open(out_dir / "eval_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, default=str)
