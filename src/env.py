@@ -76,6 +76,8 @@ class PortfolioEnv:
 
     def _get_state(self) -> np.ndarray:
         if self.states is not None:
+            if self.t >= len(self.states):
+                return np.zeros(self.states.shape[1], dtype=np.float32)
             return self.states[self.t]
         # Minimal state: previous weights + latest returns
         latest_ret = self.price_returns[self.t] if self.t < self.T else np.zeros(self.n_assets)
@@ -108,7 +110,10 @@ class PortfolioEnv:
 
         self.t += 1
         done = self.t >= self.T
-        next_state = self._get_state() if not done else np.zeros_like(self._get_state())
+        if done:
+            next_state = np.zeros(self.states.shape[1] if self.states is not None else self.n_assets * 2, dtype=np.float32)
+        else:
+            next_state = self._get_state()
         return next_state, reward, done, info
 
     def run_policy(self, policy_fn) -> dict:

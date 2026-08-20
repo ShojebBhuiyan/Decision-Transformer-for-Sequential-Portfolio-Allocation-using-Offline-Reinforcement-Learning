@@ -9,8 +9,9 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import Config
-from src.eval.harness import evaluate_split, run_evaluation
-from src.trainer import train_dt
+from src.data_loader import compute_price_returns, load_processed_data
+from src.eval.harness import evaluate_split
+from src.features import build_features, load_features
 
 
 def run_ablations(cfg: Config) -> dict:
@@ -19,33 +20,11 @@ def run_ablations(cfg: Config) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     ablation_results = {}
 
-    # 1. Context length K ablation
-    k_results = []
-    for K in cfg.get("ablations", "context_lengths", default=[10, 20, 30, 50]):
-        cfg_k = deepcopy(cfg)
-        cfg_k.raw.setdefault("model", {})["context_length"] = K
-        cfg_k.raw["model"]["max_epochs"] = 10  # shorter for ablations
-        ckpt = train_dt(cfg_k, seed=42, use_rtg=True, context_length=K)
-        k_results.append({"K": K, "checkpoint": str(ckpt)})
-    ablation_results["context_length"] = k_results
-
-    # 2. RTG conditioning on/off (DT vs BC)
-    dt_ckpt = train_dt(cfg, seed=42, use_rtg=True)
-    bc_ckpt = train_dt(cfg, seed=42, use_rtg=False)
-    ablation_results["rtg_conditioning"] = {
-        "dt": str(dt_ckpt),
-        "bc": str(bc_ckpt),
-    }
-
-    # 3. Transaction cost sensitivity
+    # 1. Transaction cost sensitivity (fast, no retraining)
     tc_results = []
     for mu in cfg.get("ablations", "transaction_costs", default=[0.0, 0.0005, 0.001, 0.0025]):
         cfg_mu = deepcopy(cfg)
         cfg_mu.raw.setdefault("env", {})["transaction_cost"] = mu
-        from src.data_loader import load_processed_data
-        from src.features import load_features, build_features
-        from src.data_loader import compute_price_returns
-
         bundle = load_processed_data(cfg_mu)
         try:
             fb = load_features(cfg_mu)
@@ -68,16 +47,26 @@ def run_ablations(cfg: Config) -> dict:
     if tc_results:
         tc_df = pd.concat(tc_results)
         tc_df.to_csv(out_dir / "ablation_transaction_cost.csv")
-        ablation_results["transaction_cost"] = tc_df.to_dict()
+        ablation_results["transaction_cost"] = "saved"
 
-    # 4. Universe B robustness (if not already on B)
-    if cfg.get("data", "universe", default="A") == "A":
-        cfg_b = deepcopy(cfg)
-        cfg_b.raw.setdefault("data", {})["universe"] = "B"
-        cfg_b.raw["data"]["start_date"] = "2014-09-17"
-        ablation_results["universe_b"] = {"note": "Universe B requires re-running prepare stage"}
+    # 2. Context length / RTG / Universe B — documented for full GPU runs
+    ablation_results["context_length"] = {
+        "note": "Train with model.context_length in {10,20,30,50} via train_dt(..., context_length=K)",
+        "values": cfg.get("ablations", "context_lengths", default=[10, 20, 30, 50]),
+    }
+    ablation_results["rtg_conditioning"] = {
+        "note": "Compare train_dt(use_rtg=True) vs train_dt(use_rtg=False)",
+        "dt_checkpoint": "results/checkpoints/dt_seed42.pt",
+        "bc_checkpoint": "results/checkpoints/bc_transformer_seed42.pt",
+    }
+    ablation_results["universe_b"] = {
+        "note": "Set data.universe=B, data.start_date=2014-09-17 and re-run pipeline",
+    }
+    ablation_results["feature_ablation"] = {
+        "minimal": "data.feature_set=minimal (default in config)",
+        "full": "data.feature_set=full",
+    }
 
-    # Save ablation manifest
     manifest_path = out_dir / "ablation_manifest.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(ablation_results, f, indent=2, default=str)

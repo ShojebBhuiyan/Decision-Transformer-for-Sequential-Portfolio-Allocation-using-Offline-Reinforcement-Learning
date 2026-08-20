@@ -1,0 +1,24 @@
+{
+  "transaction_cost": "saved",
+  "context_length": {
+    "note": "Train with model.context_length in {10,20,30,50} via train_dt(..., context_length=K)",
+    "values": [
+      10,
+      20,
+      30,
+      50
+    ]
+  },
+  "rtg_conditioning": {
+    "note": "Compare train_dt(use_rtg=True) vs train_dt(use_rtg=False)",
+    "dt_checkpoint": "results/checkpoints/dt_seed42.pt",
+    "bc_checkpoint": "results/checkpoints/bc_transformer_seed42.pt"
+  },
+  "universe_b": {
+    "note": "Set data.universe=B, data.start_date=2014-09-17 and re-run pipeline"
+  },
+  "feature_ablation": {
+    "minimal": "data.feature_set=minimal (default in config)",
+    "full": "data.feature_set=full"
+  }
+}

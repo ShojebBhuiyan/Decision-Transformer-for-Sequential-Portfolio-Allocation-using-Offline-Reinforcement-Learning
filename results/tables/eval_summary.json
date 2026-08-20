@@ -1,0 +1,11 @@
+{
+  "test_sharpe": {
+    "buy_and_hold": 1.118446274760423,
+    "equal_weight": 1.118446274760423,
+    "mean_variance": 1.1183479274491672,
+    "min_variance": 1.1177471332386795,
+    "risk_parity": -0.17767978133160536,
+    "momentum": 0.9731873254126739
+  },
+  "n_folds": 6
+}

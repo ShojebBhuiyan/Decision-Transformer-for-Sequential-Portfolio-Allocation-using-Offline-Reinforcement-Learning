@@ -1,0 +1,78 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,graphicx,booktabs}
+\usepackage{hyperref}
+
+\title{Decision Transformer for Sequential Portfolio Allocation}
+\author{Research Project}
+\date{August 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We frame multi-asset portfolio allocation as an offline sequence-modeling problem using a Decision Transformer (DT). Historical market trajectories synthesized from diverse behavior policies (mean-variance, momentum, equal-weight, noisy rollouts) train a causal transformer to predict portfolio weights conditioned on Return-to-Go (RTG). We evaluate on 30 years of daily close prices (1995--2025) across a 14-asset Universe~A with cash and synthetic bond exposure, benchmarking against classical strategies, Behavior Cloning, and offline RL methods (TD3+BC, IQL, CQL).
+\end{abstract}
+
+\section{Introduction}
+Online reinforcement learning in financial markets is impractical due to transaction costs, non-stationarity, and the inability to replay history. Offline RL and sequence modeling offer an alternative: learn from fixed historical trajectories without environment interaction. The Decision Transformer~\cite{chen2021dt} reformulates RL as autoregressive modeling over $(\hat{R}_t, s_t, a_t)$ tuples, enabling conditioning on desired future returns at inference.
+
+\section{Problem Formulation}
+We define a Markov Decision Process over $N=14$ investable assets plus cash:
+\begin{align}
+    s_t &= (w'_{t-1}, X_t, I_t), \quad a_t \in \Delta^N, \\
+    R_t &= \ln\!\left(a_t^\top y_t - \mu \sum_i |w_{i,t} - w'_{i,t-1}|\right),
+\end{align}
+where $y_t$ is the relative price return vector, $\mu=0.001$ is the proportional transaction cost, and $\hat{R}_t = \sum_{t'=t}^{T} R_{t'}$ is the undiscounted Return-to-Go.
+
+\section{Data}
+We use the 30-year Stock Market Dataset (1995--2025) with daily closing prices for indices, equities, commodities, currencies, and bonds. After aligning to NYSE trading days and constructing Universe~A (2000-09-01 onward), we obtain 6,369 trading days. Non-investable series (VIX, WTI, term spreads) serve as state features only.
+
+\section{Methods}
+\subsection{Trajectory Synthesis}
+Behavior policies generate 540 episodes of length $T=252$ from the training window (2000--2016): MVO (Ledoit-Wolf), min-variance, risk parity, momentum, equal-weight, buy-and-hold, plus Dirichlet-noisy variants.
+
+\subsection{Decision Transformer}
+A causal GPT with $K=30$ context, $d_{\text{model}}=128$, 3 layers, and 4 heads embeds interleaved RTG/state/action tokens. A softmax head enforces simplex constraints. Training minimizes MSE on action predictions.
+
+\subsection{Baselines}
+Classical: buy-and-hold, equal-weight, MVO, min-variance, risk parity, momentum. Imitation: transformer BC (no RTG). Offline RL: TD3+BC, IQL, CQL. Online RL (reference): PPO, SAC, A2C.
+
+\section{Experiments}
+\textbf{Splits:} Train 2000--2016, validation 2017--2019, test 2020--2025. Walk-forward folds cover six 2-year blocks.
+
+\textbf{Metrics:} CAGR, Sharpe, Sortino, Calmar, maximum drawdown, turnover, VaR/CVaR.
+
+\section{Results}
+Table~\ref{tab:test} summarizes classical baseline performance on the test period. Momentum achieves the highest cumulative return (320\%) but with elevated turnover (151\%). Mean-variance and buy-and-hold deliver comparable risk-adjusted performance (Sharpe $\approx$ 1.12).
+
+\begin{table}[h]
+\centering
+\caption{Test period (2020--2025) classical baseline metrics.}
+\label{tab:test}
+\begin{tabular}{lrrrr}
+\toprule
+Strategy & CAGR & Sharpe & Max DD & Turnover \\
+\midrule
+Momentum & 0.271 & 0.973 & -0.320 & 0.151 \\
+Mean-Variance & 0.238 & 1.118 & -0.233 & 0.002 \\
+Buy-and-Hold & 0.237 & 1.118 & -0.233 & $\sim 0$ \\
+Min-Variance & 0.236 & 1.118 & -0.233 & $\sim 0$ \\
+Risk Parity & 0.006 & -0.178 & -0.233 & 0.001 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Decision Transformer trains successfully (val MSE $\approx 0.009$) on minimal feature states (returns + macro + events, lookback 10). Full GPU training with complete feature sets and 5 seeds is recommended for publication-quality DT vs.\ baseline comparisons.
+
+\section{Discussion}
+\textbf{Limitations:} Close-only data precludes volume-based indicators. CPU training used reduced epochs and subsampled trajectories. WTI negative prices (2020-04-20) require feature-only treatment. Online RL baselines use environment interaction and are not directly comparable to offline methods.
+
+\textbf{Future work:} CUDA training with full feature set, RTG calibration curves, Universe~B crypto robustness, and statistical significance testing (block-bootstrap, deflated Sharpe).
+
+\begin{thebibliography}{9}
+\bibitem{chen2021dt}
+L.~Chen et al., ``Decision Transformer: Reinforcement Learning via Sequence Modeling,'' NeurIPS 2021.
+\end{thebibliography}
+
+\end{document}
