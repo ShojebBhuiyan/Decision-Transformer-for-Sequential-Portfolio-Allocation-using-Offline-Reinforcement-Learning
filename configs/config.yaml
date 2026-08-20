@@ -58,6 +58,7 @@ evaluation:
   risk_free_rate: 0.02
   benchmark: "S&P 500 ETF"
   rtg_quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+  default_rtg_quantile: 0.9  # DT conditioning target; taken from training episode RTG
 
 ablations:
   context_lengths: [10, 20, 30, 50]

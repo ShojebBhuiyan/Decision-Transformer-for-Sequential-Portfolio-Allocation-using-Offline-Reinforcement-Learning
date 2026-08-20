@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
 
 from src.config import Config
 from src.data_loader import compute_price_returns, get_split_mask, load_processed_data
 from src.eval.backtest import backtest_all_baselines, backtest_policy
 from src.eval.metrics import compute_all_metrics
+from src.eval.model_policy import (
+    load_learned_policies,
+    parse_manifest_key,
+)
 from src.features import build_features, load_features
-from src.policies import get_classical_baselines
+from src.policies import Policy, get_classical_baselines
 
 
 WALK_FORWARD_FOLDS = [
@@ -49,6 +53,86 @@ def evaluate_split(
     return backtest_all_baselines(
         split_returns, baselines, split_states, transaction_cost
     )
+
+
+def _backtest_named_policies(
+    policies: dict[str, Policy],
+    split_returns: np.ndarray,
+    split_states: np.ndarray,
+    transaction_cost: float,
+    risk_free_rate: float,
+) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
+    """Backtest a dict of policies; return metrics rows and log-return series."""
+    rows = []
+    series: dict[str, np.ndarray] = {}
+    for name, policy in policies.items():
+        result = backtest_policy(split_returns, policy, split_states, transaction_cost)
+        metrics = compute_all_metrics(
+            result["log_returns"],
+            turnovers=result["turnovers"],
+            risk_free_rate=risk_free_rate,
+        )
+        metrics["strategy"] = name
+        rows.append(metrics)
+        series[name] = result["log_returns"]
+    df = pd.DataFrame(rows) if rows else pd.DataFrame()
+    return df, series
+
+
+def evaluate_learned(
+    cfg: Config,
+    price_returns: np.ndarray,
+    states: np.ndarray,
+    dates: pd.DatetimeIndex,
+    start: str,
+    end: str,
+    transaction_cost: float,
+    risk_free_rate: float,
+    policies: dict[str, Policy] | None = None,
+) -> pd.DataFrame:
+    """Backtest trained checkpoints on a date split (one row per seed)."""
+    mask = get_split_mask(dates, start, end)
+    if mask.sum() == 0:
+        return pd.DataFrame()
+
+    if policies is None:
+        policies = load_learned_policies(
+            cfg, state_dim=states.shape[1], action_dim=price_returns.shape[1]
+        )
+    if not policies:
+        warnings.warn(
+            "No trained checkpoints found in training_manifest.json; "
+            "learned-model evaluation skipped."
+        )
+        return pd.DataFrame()
+
+    split_returns = price_returns[mask]
+    split_states = states[mask]
+    df, _series = _backtest_named_policies(
+        policies, split_returns, split_states, transaction_cost, risk_free_rate
+    )
+    if df.empty:
+        return df
+
+    parsed = df["strategy"].map(parse_manifest_key)
+    df["seed"] = parsed.map(lambda x: x[1])
+    df["strategy"] = parsed.map(lambda x: x[0])
+    return df
+
+
+def aggregate_learned_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    """Mean ± std across seeds; index is the algorithm name."""
+    if df.empty:
+        return df
+    metric_cols = [
+        c for c in df.columns if c not in ("strategy", "seed") and np.issubdtype(df[c].dtype, np.number)
+    ]
+    mean = df.groupby("strategy")[metric_cols].mean()
+    std = df.groupby("strategy")[metric_cols].std(ddof=0)
+    out = mean.copy()
+    for col in metric_cols:
+        out[f"{col}_std"] = std[col]
+    return out
 
 
 def run_evaluation(cfg: Config) -> pd.DataFrame:
@@ -87,13 +171,33 @@ def run_evaluation(cfg: Config) -> pd.DataFrame:
             df["period"] = f"{start}_{end}"
             wf_results.append(df)
 
+    # Learned models on the headline test split
+    learned_df = evaluate_learned(
+        cfg,
+        returns_aligned,
+        fb.states,
+        fb.dates,
+        cfg.get("splits", "test_start"),
+        cfg.get("splits", "test_end"),
+        tc,
+        rf,
+    )
+
     # Save results
     out_dir = cfg.project_root / "results" / "tables"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     test_df = results.get("test", pd.DataFrame())
-    if not test_df.empty:
-        test_df.to_csv(out_dir / "headline_test_metrics.csv")
+    headline = test_df
+    if not learned_df.empty:
+        learned_df.to_csv(out_dir / "learned_test_metrics.csv", index=False)
+        learned_agg = aggregate_learned_metrics(learned_df)
+        mean_cols = [c for c in learned_agg.columns if not c.endswith("_std")]
+        headline = pd.concat([test_df, learned_agg[mean_cols]]) if not test_df.empty else learned_agg[mean_cols]
+        headline.index.name = "strategy"
+
+    if not headline.empty:
+        headline.to_csv(out_dir / "headline_test_metrics.csv")
 
     if wf_results:
         wf_df = pd.concat(wf_results)
@@ -101,9 +205,16 @@ def run_evaluation(cfg: Config) -> pd.DataFrame:
 
     summary = {
         "test_sharpe": test_df["sharpe"].to_dict() if not test_df.empty else {},
+        "learned_sharpe_mean": (
+            learned_df.groupby("strategy")["sharpe"].mean().to_dict() if not learned_df.empty else {}
+        ),
+        "learned_sharpe_std": (
+            learned_df.groupby("strategy")["sharpe"].std(ddof=0).to_dict() if not learned_df.empty else {}
+        ),
         "n_folds": len(wf_results),
+        "n_learned_rows": int(len(learned_df)),
     }
     with open(out_dir / "eval_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, default=str)
 
-    return test_df
+    return headline
