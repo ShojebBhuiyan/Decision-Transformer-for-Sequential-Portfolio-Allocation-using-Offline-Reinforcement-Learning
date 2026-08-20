@@ -206,7 +206,7 @@ portfolio_dt/
 | 11 | Metrics, stats, eval harness | `feat(eval): evaluation harness and ablations` (ae222ba) | done |
 | 12 | Ablation runs | (in ae222ba) | done |
 | 13 | Paper, plots notebook, README | `docs(report): paper and results` (ae222ba) | done |
-| 14 | `implementation_summary.md` | `docs: implementation summary` | in progress |
+| 14 | `implementation_summary.md` | `docs: implementation summary` (f099ff2) | done |
 
 ---
 
