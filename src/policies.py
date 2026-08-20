@@ -63,7 +63,7 @@ class Momentum(Policy):
 def _optimize_weights(
     returns_window: np.ndarray,
     objective: str = "max_sharpe",
-    max_iter: int = 50,
+    max_iter: int = 200,
 ) -> np.ndarray:
     """Long-only portfolio optimization on simplex."""
     n = returns_window.shape[1]

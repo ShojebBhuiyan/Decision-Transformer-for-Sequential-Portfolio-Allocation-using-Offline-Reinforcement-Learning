@@ -12,6 +12,7 @@ from src.config import Config
 from src.data_loader import compute_price_returns, load_processed_data
 from src.eval.harness import evaluate_split
 from src.features import build_features, load_features
+from src.trainer import train_dt
 
 
 def run_ablations(cfg: Config) -> dict:
@@ -20,7 +21,24 @@ def run_ablations(cfg: Config) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     ablation_results = {}
 
-    # 1. Transaction cost sensitivity (fast, no retraining)
+    # 1. Context length K ablation
+    k_results = []
+    for K in cfg.get("ablations", "context_lengths", default=[10, 20, 30, 50]):
+        cfg_k = deepcopy(cfg)
+        cfg_k.raw.setdefault("model", {})["context_length"] = K
+        ckpt = train_dt(cfg_k, seed=42, use_rtg=True, context_length=K)
+        k_results.append({"K": K, "checkpoint": str(ckpt)})
+    ablation_results["context_length"] = k_results
+
+    # 2. RTG conditioning on/off (DT vs BC)
+    dt_ckpt = train_dt(cfg, seed=42, use_rtg=True)
+    bc_ckpt = train_dt(cfg, seed=42, use_rtg=False)
+    ablation_results["rtg_conditioning"] = {
+        "dt": str(dt_ckpt),
+        "bc": str(bc_ckpt),
+    }
+
+    # 3. Transaction cost sensitivity
     tc_results = []
     for mu in cfg.get("ablations", "transaction_costs", default=[0.0, 0.0005, 0.001, 0.0025]):
         cfg_mu = deepcopy(cfg)
@@ -47,26 +65,19 @@ def run_ablations(cfg: Config) -> dict:
     if tc_results:
         tc_df = pd.concat(tc_results)
         tc_df.to_csv(out_dir / "ablation_transaction_cost.csv")
-        ablation_results["transaction_cost"] = "saved"
+        ablation_results["transaction_cost"] = tc_df.to_dict()
 
-    # 2. Context length / RTG / Universe B — documented for full GPU runs
-    ablation_results["context_length"] = {
-        "note": "Train with model.context_length in {10,20,30,50} via train_dt(..., context_length=K)",
-        "values": cfg.get("ablations", "context_lengths", default=[10, 20, 30, 50]),
-    }
-    ablation_results["rtg_conditioning"] = {
-        "note": "Compare train_dt(use_rtg=True) vs train_dt(use_rtg=False)",
-        "dt_checkpoint": "results/checkpoints/dt_seed42.pt",
-        "bc_checkpoint": "results/checkpoints/bc_transformer_seed42.pt",
-    }
-    ablation_results["universe_b"] = {
-        "note": "Set data.universe=B, data.start_date=2014-09-17 and re-run pipeline",
-    }
-    ablation_results["feature_ablation"] = {
-        "minimal": "data.feature_set=minimal (default in config)",
-        "full": "data.feature_set=full",
-    }
+    # 4. Universe B robustness (if not already on B)
+    if cfg.get("data", "universe", default="A") == "A":
+        cfg_b = deepcopy(cfg)
+        cfg_b.raw.setdefault("data", {})["universe"] = "B"
+        cfg_b.raw["data"]["start_date"] = "2014-09-17"
+        ablation_results["universe_b"] = {
+            "note": "Universe B requires re-running prepare stage with data.universe=B",
+            "config": cfg_b.raw["data"],
+        }
 
+    # Save ablation manifest
     manifest_path = out_dir / "ablation_manifest.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(ablation_results, f, indent=2, default=str)
