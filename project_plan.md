@@ -192,9 +192,9 @@ portfolio_dt/
 
 | Step | Task | Commit | Status |
 |------|------|--------|--------|
-| 0 | `project_plan.md` | `docs: add project plan` | pending |
-| 1 | Scaffold repo, requirements, CUDA smoke test | `chore(setup): scaffold project` | pending |
-| 2 | `src/data_loader.py` | `feat(data): market data loader` | pending |
+| 0 | `project_plan.md` | `docs: add project plan` (dbb7a5c) | done |
+| 1 | Scaffold repo, requirements, CUDA smoke test | `chore(setup): scaffold project` (a447d47) | done |
+| 2 | `src/data_loader.py` | `feat(data): market data loader` | done |
 | 3 | EDA notebook | `docs(eda): data exploration notebook` | pending |
 | 4 | `src/features.py` + tests | `feat(features): state engineering` | pending |
 | 5 | `src/env.py`, `src/eval/backtest.py` + tests | `feat(env): portfolio environment` | pending |
