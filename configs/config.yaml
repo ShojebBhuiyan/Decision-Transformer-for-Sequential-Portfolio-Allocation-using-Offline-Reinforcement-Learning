@@ -29,7 +29,7 @@ env:
 
 trajectories:
   output_dir: data/trajectories
-  n_windows_per_policy: 200
+  n_windows_per_policy: 50
 
 model:
   context_length: 30
@@ -39,11 +39,11 @@ model:
   dropout: 0.1
   learning_rate: 0.0001
   batch_size: 64
-  max_epochs: 50
+  max_epochs: 5
   weight_decay: 0.0001
 
 training:
-  seeds: [42, 123, 456, 789, 1011]
+  seeds: [42, 123]
   checkpoint_dir: results/checkpoints
   log_dir: results/runs
 

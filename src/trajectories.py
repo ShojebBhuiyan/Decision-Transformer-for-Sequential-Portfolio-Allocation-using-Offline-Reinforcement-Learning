@@ -104,13 +104,16 @@ def generate_trajectories(cfg: Config) -> Path:
     all_episodes = []
     rng = np.random.default_rng(42)
 
-    for policy in policies:
+    print(f"Generating trajectories: {len(policies)} policies, {n_windows} windows each...")
+    for pi, policy in enumerate(policies):
         if len(valid_starts) == 0:
             continue
         chosen = rng.choice(valid_starts, size=min(n_windows, len(valid_starts)), replace=False)
         for start in chosen:
             ep = rollout_episode(env, policy, states, int(start), episode_length)
             all_episodes.append(ep)
+        if (pi + 1) % 3 == 0:
+            print(f"  Policy {pi+1}/{len(policies)}: {len(all_episodes)} episodes so far")
 
     # Persist as single compressed archive
     max_len = episode_length
