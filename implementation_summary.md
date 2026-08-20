@@ -2,7 +2,7 @@
 
 **Project:** Decision Transformer for Sequential Portfolio Allocation  
 **Date:** 2026-08-21  
-**Status:** GPU-optimized pipeline ready for full-scale experiments
+**Status:** Evaluation path complete; ready for the full training sweep
 
 ---
 
@@ -24,13 +24,17 @@ A full offline RL research pipeline in `F:\Research\RL\` framing multi-asset por
 | [`src/models/offline_rl.py`](src/models/offline_rl.py) | TD3+BC, IQL, CQL |
 | [`src/models/online_rl.py`](src/models/online_rl.py) | PPO, SAC, A2C (reference; uses interaction) |
 | [`src/trainer.py`](src/trainer.py) | GPU-resident training loops with checkpointing |
-| [`src/eval/`](src/eval/) | Backtest, metrics, stats, harness, ablations |
+| [`src/eval/`](src/eval/) | Backtest, metrics, stats, harness, ablations, learned-model policies |
+| [`src/eval/model_policy.py`](src/eval/model_policy.py) | RTG-conditioned `DTPolicy` and `AgentPolicy` checkpoint wrappers |
+| [`src/eval/rtg_calibration.py`](src/eval/rtg_calibration.py) | Target-RTG quantile sweep and calibration figure |
+| [`src/eval/universe_b.py`](src/eval/universe_b.py) | Universe B prepare + classical eval (scoped artifacts) |
 | [`configs/config.yaml`](configs/config.yaml) | Default hyperparameters (`batch_size: 256`) |
 | [`main.py`](main.py) | Pipeline entrypoint |
 | [`notebooks/`](notebooks/) | EDA and evaluation notebooks |
 | [`paper/main.tex`](paper/main.tex) | LaTeX paper draft |
 | [`scripts/verify_training.py`](scripts/verify_training.py) | Smoke-trains every model and reloads each checkpoint |
-| [`tests/`](tests/) | 41 unit tests (all passing) |
+| [`scripts/run_universe_b.py`](scripts/run_universe_b.py) | Universe B pipeline (does not clobber Universe A) |
+| [`tests/`](tests/) | 58 unit tests (all passing) |
 
 ---
 
@@ -92,6 +96,7 @@ retraining. `training.steps_per_epoch: 200` keeps 50 epochs × 200 steps × 256 
 | `training.steps_per_epoch` | 200 | `null` = full pass (3189 steps @ batch 256) |
 | `training.max_val_batches` | 40 | `null` = all 354 validation batches |
 | `training.gpu_resident_buffer` | true | `false` = CPU storage + per-batch copy |
+| `training.force_retrain` | false | `true` = ignore existing checkpoints when resuming |
 
 ---
 
@@ -115,14 +120,23 @@ pytest tests/ -q
 ```bash
 python main.py --stage prepare      # Load & process market data
 python main.py --stage trajectories # Synthesize offline trajectories (format v2, ~few min)
-python main.py --stage train        # Train DT, BC, offline/online RL (GPU-bound)
-python main.py --stage evaluate     # Backtest classical baselines
-python main.py --stage ablations    # Transaction cost sweep + ablation manifest
+python main.py --stage train        # Train DT, BC, offline/online RL (resumable, ~8h)
+python main.py --stage evaluate     # Classical + learned backtests, stats, RTG calibration
+python main.py --stage ablations    # Transaction cost / K / Universe B classical eval
 ```
 
 Or run everything: `python main.py --stage all`
 
 **Note:** After upgrading to format v2, delete old `data/trajectories/trajectories.npz` and re-run `--stage trajectories`.
+
+Universe B (Bitcoin + Aluminum from 2014-09-17) writes to scoped subdirectories and leaves Universe A untouched:
+
+```bash
+python scripts/run_universe_b.py --stage prepare
+python scripts/run_universe_b.py --stage trajectories
+python scripts/run_universe_b.py --stage train      # same 5×8 sweep, scoped checkpoints
+python scripts/run_universe_b.py --stage evaluate
+```
 
 ### 3. Notebooks & figures
 
@@ -150,7 +164,7 @@ cd paper && pdflatex main.tex
 | Min-Variance | 23.6% | 1.12 | -23.3% | ~0 |
 | Risk Parity | 0.6% | -0.18 | -23.3% | 0.14% |
 
-Results tables: `results/tables/headline_test_metrics.csv`, `walkforward_metrics.csv`
+Results tables: `results/tables/headline_test_metrics.csv`, `walkforward_metrics.csv`, `learned_test_metrics.csv`, `significance_tests.csv`, `rtg_calibration.csv`, `walkforward_learned_metrics.csv`. Learned-model rows appear in the headline table after `--stage train` then `--stage evaluate`.
 
 ---
 
@@ -169,6 +183,18 @@ now covered by `tests/test_training_regressions.py`.
 | RL checkpoints | Saved only the algorithm **name string** | All `nn.Module` weights under `modules` |
 | PPO / A2C | Crashed on pre-v2 batch shapes | Consume `last_state_only` batches; verified stable over 400+ steps |
 
+## Learned-model evaluation
+
+`--stage evaluate` now loads every successful entry in `training_manifest.json`:
+
+1. **`DTPolicy`** — rolling K-step context, RTG budget decremented by realized log reward, normalized with `trajectory_meta.json` stats. The current-step action slot is zero-filled (the causal mask already hides it).
+2. **`AgentPolicy`** — restores the `modules` dict from RL checkpoints and projects onto the simplex.
+3. **Headline + walk-forward** — per-seed backtests aggregated as mean ± std. Walk-forward folds whose start date is on or before `splits.train_end` are flagged `in_sample=True`.
+4. **RTG calibration** — quantiles in `evaluation.rtg_quantiles`, budget reset every `env.episode_length` (252) days so a multi-year test window stays in-distribution relative to training episodes. Figure: `results/figures/eval/rtg_calibration.png`.
+5. **Significance** — circular block-bootstrap Sharpe CIs vs buy-and-hold, Ledoit-Wolf p-values, Bailey–Lopez de Prado deflated Sharpe with `n_trials` = number of evaluated strategies. Table: `results/tables/significance_tests.csv`.
+
+Universe A keeps legacy paths (`data/processed/`, `results/checkpoints/`, …). Universe B is isolated under `*/universe_B/` via `Config.artifact_scope`. Prepare + trajectories for B have been run (16 assets, 2816 days, 3600 episodes); B training is not.
+
 ## Known Limitations
 
 1. **Close-only data** — no volume, no intraday features.
@@ -176,20 +202,19 @@ now covered by `tests/test_training_regressions.py`.
 3. **Online RL caveat** — PPO/SAC/A2C are single-step adaptations over an offline buffer, not true environment interaction; treat them as reference points, not a fair online comparison.
 4. **Risk parity underperformance** — may need tuning of lookback window.
 5. **Noisy policy RNG** — vectorized Dirichlet (gamma trick) is statistically equivalent but not bit-identical to per-day `rng.dirichlet`.
-6. **Evaluation covers classical baselines only** — `src/eval/harness.py` does not yet backtest trained DT/BC/RL checkpoints, so training metrics do not reach the results tables.
-7. **Generated data artifacts** — `data/processed/`, `data/trajectories/`, `results/checkpoints/` are gitignored; must re-run pipeline on fresh clone.
+6. **Generated data artifacts** — `data/processed/`, `data/trajectories/`, `results/checkpoints/` are gitignored; must re-run pipeline on fresh clone.
+7. **RTG reset horizon** — during multi-year DT rollouts the remaining-return budget is reset every 252 trading days (the training episode length). Realized vs. target RTG is therefore comparable per reset window, not against a single test-horizon target. This is a methodological choice, not a bug.
 
 ---
 
 ## Prioritized Next Steps
 
-1. **Run full training sweep** — `python main.py --stage train` (5 seeds × 8 models × 50 epochs at `steps_per_epoch: 200`). Verify the manifest ends with 40 entries; it is now written after every model, so an interrupted sweep keeps its progress.
-2. **DT inference loop** — implement RTG-conditioned rollout on test period and add to evaluation harness. Until this lands, `results/tables/` reflects classical baselines only.
-3. **RTG calibration curve** — sweep target RTG quantiles, plot realized vs. target return.
-4. **Universe B** — set `data.universe: B`, `start_date: 2014-09-17`, re-run pipeline.
-5. **Statistical tests** — wire `src/eval/stats.py` into harness (block-bootstrap CIs, deflated Sharpe).
-6. **Fix PPO** — investigate Dirichlet NaN from state distribution; add gradient clipping.
-7. **Walk-forward DT evaluation** — load checkpoints per fold, report mean ± std across seeds.
+Code for the previous list is in; remaining work is running the experiments:
+
+1. **Run the full Universe A training sweep** — `python main.py --stage train` (5 seeds × 8 models × 50 epochs at `steps_per_epoch: 200`, ~8h). The sweep is resumable: completed checkpoints are skipped unless `training.force_retrain: true`. A finished run prints `Sweep complete: 40 of 40 succeeded`.
+2. **Populate result tables** — `python main.py --stage evaluate` after the sweep. Writes learned metrics, RTG calibration, significance tests, and walk-forward learned rows.
+3. **Universe B training** — `python scripts/run_universe_b.py --stage train` then `--stage evaluate` (prepare + trajectories already generated into scoped paths).
+4. **Paper numbers** — fold the new tables into `paper/main.tex` once the sweep finishes.
 
 ---
 
@@ -205,6 +230,20 @@ now covered by `tests/test_training_regressions.py`.
 | 6 | `perf(features): fingerprinted feature cache` |
 | 7 | `test: equivalence and regression coverage for optimizations` |
 | 8 | `docs: record optimization architecture and revised runtimes` |
+
+## Git Commit History (learned-model evaluation)
+
+| Step | Commit message |
+|------|----------------|
+| 1 | `feat(eval): RTG-conditioned DT and RL checkpoint policies` |
+| 2 | `feat(eval): backtest trained checkpoints in the headline harness` |
+| 3 | `feat(eval): RTG calibration sweep and figure` |
+| 4 | `feat(eval): wire block-bootstrap CIs and deflated Sharpe into harness` |
+| 5 | `feat(data): universe-scoped artifact paths and Universe B driver` |
+| 6 | `feat(eval): walk-forward evaluation of learned checkpoints` |
+| 7 | `feat(train): resumable sweep skipping completed checkpoints` |
+| 8 | `test: coverage for learned-model evaluation` |
+| 9 | `docs: record learned-model evaluation path` |
 
 ---
 
