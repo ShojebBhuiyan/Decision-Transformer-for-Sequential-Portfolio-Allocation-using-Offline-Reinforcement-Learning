@@ -195,18 +195,18 @@ portfolio_dt/
 | 0 | `project_plan.md` | `docs: add project plan` (dbb7a5c) | done |
 | 1 | Scaffold repo, requirements, CUDA smoke test | `chore(setup): scaffold project` (a447d47) | done |
 | 2 | `src/data_loader.py` | `feat(data): market data loader` | done |
-| 3 | EDA notebook | `docs(eda): data exploration notebook` | pending |
-| 4 | `src/features.py` + tests | `feat(features): state engineering` | pending |
-| 5 | `src/env.py`, `src/eval/backtest.py` + tests | `feat(env): portfolio environment` | pending |
-| 6 | `src/policies.py` | `feat(policies): baseline strategies` | pending |
-| 7 | `src/trajectories.py`, `src/dataset.py` | `feat(trajectories): offline dataset` | pending |
-| 8 | Decision Transformer + trainer | `feat(dt): decision transformer` | pending |
-| 9 | BC + offline RL | `feat(models): bc and offline rl` | pending |
-| 10 | Online RL | `feat(models): online rl baselines` | pending |
-| 11 | Metrics, stats, eval harness | `feat(eval): evaluation harness` | pending |
-| 12 | Ablation runs | `exp(ablations): run ablation suite` | pending |
-| 13 | Paper, plots notebook, README | `docs(report): paper and results` | pending |
-| 14 | `implementation_summary.md` | `docs: implementation summary` | pending |
+| 3 | EDA notebook | `docs(eda): data exploration notebook` (3e9f4b1) | done |
+| 4 | `src/features.py` + tests | (in setup commit a447d47) | done |
+| 5 | `src/env.py`, backtest + tests | (in setup commit a447d47) | done |
+| 6 | `src/policies.py` | (in setup commit a447d47) | done |
+| 7 | `src/trajectories.py` | `feat(trajectories): generate offline trajectory dataset` (e634abe) | done |
+| 8 | Decision Transformer + trainer | `feat(models): train DT, BC, and offline RL` (f13878e) | done |
+| 9 | BC + offline RL | (in f13878e) | done |
+| 10 | Online RL | (in f13878e, PPO partial) | done |
+| 11 | Metrics, stats, eval harness | `feat(eval): evaluation harness and ablations` (ae222ba) | done |
+| 12 | Ablation runs | (in ae222ba) | done |
+| 13 | Paper, plots notebook, README | `docs(report): paper and results` (ae222ba) | done |
+| 14 | `implementation_summary.md` | `docs: implementation summary` | in progress |
 
 ---
 
