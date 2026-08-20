@@ -65,14 +65,18 @@ class TD3BC:
         alpha: float = 2.5,
         lr: float = 3e-4,
         gamma: float = 0.99,
+        tau: float = 0.005,
         device: str = "cpu",
     ):
         self.device = device
         self.alpha = alpha
         self.gamma = gamma
+        self.tau = tau
         self.actor = SimplexActor(state_dim, action_dim).to(device)
         self.critic = TwinCritic(state_dim, action_dim).to(device)
         self.critic_target = copy.deepcopy(self.critic)
+        for p in self.critic_target.parameters():
+            p.requires_grad_(False)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
 
@@ -80,13 +84,14 @@ class TD3BC:
         states = torch.nan_to_num(batch["states"].to(self.device), nan=0.0)
         actions = batch["target_action"].to(self.device)
         rewards = batch["rewards"][:, -1].to(self.device)
-        next_states = states  # simplified: same episode context
+        next_states = torch.nan_to_num(batch["next_states"].to(self.device), nan=0.0)
+        not_done = 1.0 - batch["dones"][:, -1].to(self.device)
 
         # Critic update
         with torch.no_grad():
             next_action = self.actor(next_states)
             q1_t, q2_t = self.critic_target(next_states, next_action)
-            target_q = rewards.unsqueeze(-1) + self.gamma * torch.min(q1_t, q2_t)
+            target_q = rewards.unsqueeze(-1) + self.gamma * not_done.unsqueeze(-1) * torch.min(q1_t, q2_t)
 
         q1, q2 = self.critic(states, actions)
         critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
@@ -102,6 +107,10 @@ class TD3BC:
         self.actor_opt.zero_grad()
         actor_loss.backward()
         self.actor_opt.step()
+
+        with torch.no_grad():
+            for p, tp in zip(self.critic.parameters(), self.critic_target.parameters()):
+                tp.mul_(1 - self.tau).add_(p, alpha=self.tau)
 
         return {"critic_loss": critic_loss.item(), "actor_loss": actor_loss.item()}
 
@@ -121,14 +130,21 @@ class IQL:
         temperature: float = 3.0,
         lr: float = 3e-4,
         gamma: float = 0.99,
+        tau: float = 0.005,
         device: str = "cpu",
     ):
         self.device = device
         self.expectile = expectile
         self.temperature = temperature
         self.gamma = gamma
+        self.tau = tau
         self.actor = SimplexActor(state_dim, action_dim).to(device)
         self.critic = TwinCritic(state_dim, action_dim).to(device)
+        # IQL fits V against a *target* Q; without it V and Q chase each other
+        # and the critic diverges.
+        self.critic_target = copy.deepcopy(self.critic)
+        for p in self.critic_target.parameters():
+            p.requires_grad_(False)
         self.value = nn.Sequential(
             nn.Linear(state_dim, 256), nn.ReLU(),
             nn.Linear(256, 256), nn.ReLU(),
@@ -146,22 +162,25 @@ class IQL:
         states = torch.nan_to_num(batch["states"].to(self.device), nan=0.0)
         actions = batch["target_action"].to(self.device)
         rewards = batch["rewards"][:, -1].to(self.device)
+        next_states = torch.nan_to_num(batch["next_states"].to(self.device), nan=0.0)
+        not_done = 1.0 - batch["dones"][:, -1].to(self.device)
         s = states[:, -1, :]
+        s_next = next_states[:, -1, :]
 
-        # Value update
+        # Value update against the frozen target critic
         with torch.no_grad():
-            q1, q2 = self.critic(states, actions)
-            q = torch.min(q1, q2)
+            q1_t, q2_t = self.critic_target(states, actions)
+            q_target = torch.min(q1_t, q2_t)
         v = self.value(s)
-        value_loss = self._expectile_loss(q - v)
+        value_loss = self._expectile_loss(q_target - v)
         self.value_opt.zero_grad()
         value_loss.backward()
         self.value_opt.step()
 
-        # Critic update
+        # Critic update: bootstrap from the *next* state's value
         with torch.no_grad():
-            next_v = self.value(s)
-            target_q = rewards.unsqueeze(-1) + self.gamma * next_v
+            next_v = self.value(s_next)
+            target_q = rewards.unsqueeze(-1) + self.gamma * not_done.unsqueeze(-1) * next_v
         q1, q2 = self.critic(states, actions)
         critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
         self.critic_opt.zero_grad()
@@ -170,13 +189,17 @@ class IQL:
 
         # Actor update: advantage-weighted BC
         with torch.no_grad():
-            adv = q - self.value(s)
+            adv = q_target - self.value(s)
             weights = torch.exp(adv / self.temperature).clamp(max=100.0)
         pi_action = self.actor(states)
         actor_loss = (weights * F.mse_loss(pi_action, actions, reduction="none").mean(-1, keepdim=True)).mean()
         self.actor_opt.zero_grad()
         actor_loss.backward()
         self.actor_opt.step()
+
+        with torch.no_grad():
+            for p, tp in zip(self.critic.parameters(), self.critic_target.parameters()):
+                tp.mul_(1 - self.tau).add_(p, alpha=self.tau)
 
         return {"value_loss": value_loss.item(), "critic_loss": critic_loss.item(), "actor_loss": actor_loss.item()}
 
@@ -195,13 +218,20 @@ class CQL:
         cql_alpha: float = 1.0,
         lr: float = 3e-4,
         gamma: float = 0.99,
+        tau: float = 0.005,
+        n_action_samples: int = 10,
         device: str = "cpu",
     ):
         self.device = device
         self.cql_alpha = cql_alpha
         self.gamma = gamma
+        self.tau = tau
+        self.n_action_samples = n_action_samples
         self.actor = SimplexActor(state_dim, action_dim).to(device)
         self.critic = TwinCritic(state_dim, action_dim).to(device)
+        self.critic_target = copy.deepcopy(self.critic)
+        for p in self.critic_target.parameters():
+            p.requires_grad_(False)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
 
@@ -209,34 +239,47 @@ class CQL:
         states = torch.nan_to_num(batch["states"].to(self.device), nan=0.0)
         actions = batch["target_action"].to(self.device)
         rewards = batch["rewards"][:, -1].to(self.device)
+        next_states = torch.nan_to_num(batch["next_states"].to(self.device), nan=0.0)
+        not_done = 1.0 - batch["dones"][:, -1].to(self.device)
 
         # Critic with CQL penalty
         q1, q2 = self.critic(states, actions)
         with torch.no_grad():
-            next_action = self.actor(states)
-            q1_next, q2_next = self.critic(states, next_action)
-            target_q = rewards.unsqueeze(-1) + self.gamma * torch.min(q1_next, q2_next)
+            next_action = self.actor(next_states)
+            q1_next, q2_next = self.critic_target(next_states, next_action)
+            target_q = rewards.unsqueeze(-1) + self.gamma * not_done.unsqueeze(-1) * torch.min(q1_next, q2_next)
 
         td_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
 
-        # CQL conservative term: log-sum-exp over random actions
-        random_actions = F.softmax(torch.randn(actions.shape[0], actions.shape[1], device=self.device), dim=-1)
-        q1_rand, q2_rand = self.critic(states, random_actions)
-        cql_penalty = (torch.logsumexp(q1_rand, dim=0).mean() - q1.mean()) + \
-                      (torch.logsumexp(q2_rand, dim=0).mean() - q2.mean())
+        # CQL(H) conservative term: log-sum-exp over sampled actions per state,
+        # not over the batch, so the penalty measures out-of-distribution Q mass.
+        s = states[:, -1, :] if states.dim() == 3 else states
+        B, A = actions.shape
+        N = self.n_action_samples
+        rand_actions = F.softmax(torch.randn(B, N, A, device=self.device), dim=-1)
+        s_rep = s.unsqueeze(1).expand(-1, N, -1).reshape(B * N, -1)
+        q1_rand, q2_rand = self.critic(s_rep, rand_actions.reshape(B * N, A))
+        cql_penalty = (
+            (torch.logsumexp(q1_rand.view(B, N), dim=1).mean() - q1.mean())
+            + (torch.logsumexp(q2_rand.view(B, N), dim=1).mean() - q2.mean())
+        )
         critic_loss = td_loss + self.cql_alpha * cql_penalty
 
         self.critic_opt.zero_grad()
         critic_loss.backward()
         self.critic_opt.step()
 
-        # Actor: maximize Q
+        # Actor: maximize Q with a BC anchor so it stays near the data
         pi_action = self.actor(states)
         q_pi = self.critic.q1_forward(states, pi_action)
-        actor_loss = -q_pi.mean()
+        actor_loss = -q_pi.mean() + F.mse_loss(pi_action, actions)
         self.actor_opt.zero_grad()
         actor_loss.backward()
         self.actor_opt.step()
+
+        with torch.no_grad():
+            for p, tp in zip(self.critic.parameters(), self.critic_target.parameters()):
+                tp.mul_(1 - self.tau).add_(p, alpha=self.tau)
 
         return {"critic_loss": critic_loss.item(), "actor_loss": actor_loss.item()}
 

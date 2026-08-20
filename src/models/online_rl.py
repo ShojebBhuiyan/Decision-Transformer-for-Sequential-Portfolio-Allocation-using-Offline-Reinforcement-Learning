@@ -103,9 +103,11 @@ class PPO:
 class SAC:
     """Soft Actor-Critic (discrete/simplex variant)."""
 
-    def __init__(self, state_dim: int, action_dim: int, lr: float = 3e-4, alpha: float = 0.2, device: str = "cpu"):
+    def __init__(self, state_dim: int, action_dim: int, lr: float = 3e-4, alpha: float = 0.2,
+                 gamma: float = 0.99, device: str = "cpu"):
         self.device = device
         self.alpha = alpha
+        self.gamma = gamma
         self.actor = DirichletActor(state_dim, action_dim).to(device)
         self.critic = nn.Sequential(
             nn.Linear(state_dim + action_dim, 256), nn.ReLU(),
@@ -119,9 +121,16 @@ class SAC:
         actions = batch["target_action"].to(self.device)
         rewards = batch["rewards"][:, -1].to(self.device)
         s = torch.nan_to_num(states[:, -1, :], nan=0.0)
+        s_next = torch.nan_to_num(batch["next_states"].to(self.device)[:, -1, :], nan=0.0)
+        not_done = 1.0 - batch["dones"][:, -1].to(self.device)
+
+        with torch.no_grad():
+            next_a = self.actor.get_action(s_next)
+            q_next = self.critic(torch.cat([s_next, next_a], -1)).squeeze(-1)
+            target_q = rewards + self.gamma * not_done * q_next
 
         q = self.critic(torch.cat([s, actions], -1)).squeeze(-1)
-        critic_loss = F.mse_loss(q, rewards)
+        critic_loss = F.mse_loss(q, target_q)
         self.critic_opt.zero_grad()
         critic_loss.backward()
         self.critic_opt.step()
