@@ -29,7 +29,8 @@ A full offline RL research pipeline in `F:\Research\RL\` framing multi-asset por
 | [`main.py`](main.py) | Pipeline entrypoint |
 | [`notebooks/`](notebooks/) | EDA and evaluation notebooks |
 | [`paper/main.tex`](paper/main.tex) | LaTeX paper draft |
-| [`tests/`](tests/) | 27 unit tests (all passing) |
+| [`scripts/verify_training.py`](scripts/verify_training.py) | Smoke-trains every model and reloads each checkpoint |
+| [`tests/`](tests/) | 41 unit tests (all passing) |
 
 ---
 
@@ -61,15 +62,36 @@ A full offline RL research pipeline in `F:\Research\RL\` framing multi-asset por
 
 GTX 1070 (compute 6.1) has no tensor cores and ~1/64 fp16 throughput vs fp32 on GP104. Mixed precision would likely slow training, so it is intentionally disabled.
 
-### Revised runtime expectations
+### Measured runtime on a GTX 1070
 
-| Stage | Before (CPU-bound) | After (optimized) |
-|-------|-------------------|-------------------|
-| Trajectory generation | Tens of minutes | Few minutes |
-| Training GPU utilization | 3–4% | GPU compute-bound |
-| Full sweep (5 seeds × 8 models × 50 epochs) | N/A | Multi-hour to overnight |
+Benchmarked at `d_model=192`, `n_layers=4`, `K=30` (90 tokens), 816,480 training samples:
 
-Use `training.steps_per_epoch` to bound training runtime without code changes.
+| Batch size | ms/step | samples/s | Peak VRAM | Full epoch |
+|-----------:|--------:|----------:|----------:|-----------:|
+| 128 | 101 | 1,269 | 903 MB | 10.7 min |
+| 256 | 196 | 1,306 | 1,600 MB | 10.4 min |
+| 512 | 393 | 1,302 | 2,989 MB | 10.5 min |
+| 1024 | 785 | 1,305 | 5,734 MB | 10.4 min |
+
+Throughput plateaus at ~1,300 samples/s, so the GPU is genuinely compute-saturated;
+larger batches buy nothing but memory. Batch 256 is the default.
+
+Cost breakdown per step at batch 128: 103 ms model, 13 ms CPU gather
+(1 ms when `gpu_resident_buffer: true`). Padding-masked attention costs about
+10% over the fused causal path, so a fully-valid mask is dropped to reach it.
+
+RL agents are far cheaper: 4–9 ms/step (0.2–0.5 min per full epoch).
+
+**A full-pass sweep is not feasible on this hardware:** 5 seeds × 2 transformer
+models × 50 epochs at 10.4 min/epoch is ~87 hours, plus ~52 hours of ablation
+retraining. `training.steps_per_epoch: 200` keeps 50 epochs × 200 steps × 256 =
+2.56M samples (~3 full passes) and brings the sweep into an overnight window.
+
+| Knob | Default | Effect |
+|------|---------|--------|
+| `training.steps_per_epoch` | 200 | `null` = full pass (3189 steps @ batch 256) |
+| `training.max_val_batches` | 40 | `null` = all 354 validation batches |
+| `training.gpu_resident_buffer` | true | `false` = CPU storage + per-batch copy |
 
 ---
 
@@ -132,21 +154,37 @@ Results tables: `results/tables/headline_test_metrics.csv`, `walkforward_metrics
 
 ---
 
+## RL correctness fixes
+
+The RL baselines had defects that made their reported losses meaningless. All are
+now covered by `tests/test_training_regressions.py`.
+
+| Issue | Before | After |
+|-------|--------|-------|
+| Bellman target | `next_state = state`, so `Q(s) = r + γQ(s)` diverged | Real next state from `episode_starts`, with `dones` cutting the bootstrap at episode end |
+| TD3+BC target critic | Deep-copied once, never updated | Polyak update, `tau = 0.005` |
+| IQL value target | `V` fit against the live `Q`, chasing itself (loss → 10⁴) | `V` fit against a frozen target critic (loss ≈ 5e-4) |
+| CQL penalty | `logsumexp` over the **batch**, so the loss was ~`2·log(batch)` | `logsumexp` over 10 sampled actions per state (CQL(H)) |
+| CQL actor | Unbounded `-Q` maximization, drifting to -16 | BC anchor added, stays bounded |
+| RL checkpoints | Saved only the algorithm **name string** | All `nn.Module` weights under `modules` |
+| PPO / A2C | Crashed on pre-v2 batch shapes | Consume `last_state_only` batches; verified stable over 400+ steps |
+
 ## Known Limitations
 
 1. **Close-only data** — no volume, no intraday features.
 2. **WTI negative price** (2020-04-20) — used as feature only, not investable.
-3. **Online RL caveat** — PPO/SAC/A2C interact with environment; not fair offline comparison.
+3. **Online RL caveat** — PPO/SAC/A2C are single-step adaptations over an offline buffer, not true environment interaction; treat them as reference points, not a fair online comparison.
 4. **Risk parity underperformance** — may need tuning of lookback window.
 5. **Noisy policy RNG** — vectorized Dirichlet (gamma trick) is statistically equivalent but not bit-identical to per-day `rng.dirichlet`.
-6. **Generated data artifacts** — `data/processed/`, `data/trajectories/`, `results/checkpoints/` are gitignored; must re-run pipeline on fresh clone.
+6. **Evaluation covers classical baselines only** — `src/eval/harness.py` does not yet backtest trained DT/BC/RL checkpoints, so training metrics do not reach the results tables.
+7. **Generated data artifacts** — `data/processed/`, `data/trajectories/`, `results/checkpoints/` are gitignored; must re-run pipeline on fresh clone.
 
 ---
 
 ## Prioritized Next Steps
 
-1. **Run full training sweep** — 5 seeds × 8 models × 50 epochs with format v2 trajectories.
-2. **DT inference loop** — implement RTG-conditioned rollout on test period and add to evaluation harness.
+1. **Run full training sweep** — `python main.py --stage train` (5 seeds × 8 models × 50 epochs at `steps_per_epoch: 200`). Verify the manifest ends with 40 entries; it is now written after every model, so an interrupted sweep keeps its progress.
+2. **DT inference loop** — implement RTG-conditioned rollout on test period and add to evaluation harness. Until this lands, `results/tables/` reflects classical baselines only.
 3. **RTG calibration curve** — sweep target RTG quantiles, plot realized vs. target return.
 4. **Universe B** — set `data.universe: B`, `start_date: 2014-09-17`, re-run pipeline.
 5. **Statistical tests** — wire `src/eval/stats.py` into harness (block-bootstrap CIs, deflated Sharpe).

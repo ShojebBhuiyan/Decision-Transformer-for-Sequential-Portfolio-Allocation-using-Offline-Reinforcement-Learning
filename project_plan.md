@@ -24,6 +24,8 @@ Three CPU bottlenecks were removed so training is GPU-bound rather than DataLoad
 
 Additional fixes: attention padding mask NaN bug (diagonal always attendable); RTG stats masked by `lengths`; fingerprinted feature cache; `batch_size: 256`, `cudnn.benchmark=True`. **AMP deliberately skipped** on Pascal (GTX 1070, compute 6.1, no tensor cores).
 
+Measured on a GTX 1070: ~1,300 samples/s regardless of batch size (GPU compute-saturated), so a full-pass 5-seed sweep would take ~87 h. `training.steps_per_epoch: 200` keeps ~3 full passes across 50 epochs and fits overnight. See [implementation_summary.md](implementation_summary.md) for the benchmark table and the RL correctness fixes.
+
 **Re-run required:** `python main.py --stage trajectories` after pulling (format v2 breaks v1 files).
 
 ---
@@ -229,6 +231,9 @@ portfolio_dt/
 | 20 | Fingerprinted feature cache | `perf(features): fingerprinted feature cache` | done |
 | 21 | Optimization regression tests | `test: equivalence and regression coverage for optimizations` | done |
 | 22 | Optimization docs | `docs: record optimization architecture and revised runtimes` | done |
+| 23 | Epoch sampling + checkpoint/manifest fixes | `fix(train): correct epoch sampling, checkpoints and sweep resilience` | done |
+| 24 | RL Bellman/target/CQL correctness | `fix(models): use real transitions and target networks in RL baselines` | done |
+| 25 | Training regression tests | `test: cover RL correctness and checkpoint round-trip` | done |
 
 ---
 
