@@ -9,6 +9,7 @@ from src.env import (
     compute_turnover,
     equal_weights,
     project_to_simplex,
+    project_to_simplex_batch,
 )
 
 
@@ -22,6 +23,13 @@ def test_project_to_simplex():
     w = project_to_simplex(v)
     assert abs(w.sum() - 1.0) < 1e-10
     assert (w >= 0).all()
+
+
+def test_project_to_simplex_batch_rows():
+    V = np.array([[0.5, -0.2, 0.8], [0.1, 0.1, 0.1]])
+    W = project_to_simplex_batch(V)
+    assert W.shape == V.shape
+    assert np.allclose(W.sum(axis=1), 1.0)
 
 
 def test_turnover():

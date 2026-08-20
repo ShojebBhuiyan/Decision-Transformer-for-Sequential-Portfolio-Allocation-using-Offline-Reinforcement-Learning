@@ -11,18 +11,25 @@ import numpy as np
 def project_to_simplex(v: np.ndarray) -> np.ndarray:
     """Project vector onto probability simplex (Duchi et al. 2008)."""
     if v.ndim == 1:
-        n = len(v)
-        u = np.sort(v)[::-1]
-        cssv = np.cumsum(u)
-        rho = np.nonzero(u * np.arange(1, n + 1) > (cssv - 1))[0]
-        if len(rho) == 0:
-            theta = 0.0
-        else:
-            rho = rho[-1]
-            theta = (cssv[rho] - 1) / (rho + 1)
-        w = np.maximum(v - theta, 0)
-        return w / (w.sum() + 1e-12)
-    raise NotImplementedError("Batch simplex projection not implemented")
+        return project_to_simplex_batch(v.reshape(1, -1))[0]
+    return project_to_simplex_batch(v)
+
+
+def project_to_simplex_batch(V: np.ndarray) -> np.ndarray:
+    """Project each row of V onto the probability simplex (Duchi et al. 2008)."""
+    if V.ndim == 1:
+        V = V.reshape(1, -1)
+    n = V.shape[1]
+    u = np.sort(V, axis=1)[:, ::-1]
+    cssv = np.cumsum(u, axis=1)
+    ranks = np.arange(1, n + 1, dtype=V.dtype)
+    cond = u * ranks > (cssv - 1)
+    # Last True index per row
+    rho = cond.sum(axis=1) - 1
+    rho = np.clip(rho, 0, n - 1)
+    theta = (cssv[np.arange(V.shape[0]), rho] - 1) / (rho + 1)
+    w = np.maximum(V - theta[:, None], 0)
+    return w / (w.sum(axis=1, keepdims=True) + 1e-12)
 
 
 def equal_weights(n: int) -> np.ndarray:
