@@ -9,14 +9,13 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, random_split
 
 from src.config import Config
-from src.dataset import load_trajectory_dataset
-from src.models.bc import MLPBC, TransformerBC
+from src.models.bc import TransformerBC
 from src.models.decision_transformer import DecisionTransformer
 from src.models.offline_rl import CQL, IQL, TD3BC
 from src.models.online_rl import A2C, PPO, SAC
+from src.trajectories import GPUTrajectoryBuffer
 
 
 def get_device(cfg: Config) -> str:
@@ -26,6 +25,11 @@ def get_device(cfg: Config) -> str:
     return "cpu"
 
 
+def _setup_training(cfg: Config) -> None:
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+
+
 def train_dt(
     cfg: Config,
     seed: int = 42,
@@ -33,6 +37,7 @@ def train_dt(
     context_length: int | None = None,
 ) -> Path:
     """Train Decision Transformer (or BC if use_rtg=False)."""
+    _setup_training(cfg)
     torch.manual_seed(seed)
     np.random.seed(seed)
     device = get_device(cfg)
@@ -43,28 +48,21 @@ def train_dt(
     n_heads = int(cfg.get("model", "n_heads", default=6))
     dropout = float(cfg.get("model", "dropout", default=0.1))
     lr = float(cfg.get("model", "learning_rate", default=1e-4))
-    batch_size = int(cfg.get("model", "batch_size", default=64))
+    batch_size = int(cfg.get("model", "batch_size", default=256))
     max_epochs = int(cfg.get("model", "max_epochs", default=50))
     weight_decay = float(cfg.get("model", "weight_decay", default=1e-4))
+    steps_per_epoch = cfg.get("training", "steps_per_epoch", default=None)
+    if steps_per_epoch is not None:
+        steps_per_epoch = int(steps_per_epoch)
 
-    dataset = load_trajectory_dataset(cfg)
-    state_dim = dataset.states.shape[2]
-    action_dim = dataset.actions.shape[2]
+    buffer = GPUTrajectoryBuffer(cfg, device, context_length=K, seed=seed)
+    state_dim = buffer.state_dim
+    action_dim = buffer.n_assets
 
-    # Subsample for fast training on CPU if dataset is large
     max_samples = int(cfg.get("model", "max_train_samples", default=0))
-    if max_samples > 0 and len(dataset) > max_samples:
-        indices = torch.randperm(len(dataset))[:max_samples].tolist()
-        dataset = torch.utils.data.Subset(dataset, indices)
-
-    n_val = max(1, int(0.1 * len(dataset)))
-    n_train = len(dataset) - n_val
-    train_ds, val_ds = random_split(
-        dataset, [n_train, n_val],
-        generator=torch.Generator().manual_seed(seed),
-    )
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size)
+    if max_samples > 0 and len(buffer.train_indices) > max_samples:
+        perm = torch.randperm(len(buffer.train_indices), device=device)
+        buffer.train_indices = buffer.train_indices[perm[:max_samples]]
 
     if use_rtg:
         model = DecisionTransformer(
@@ -92,17 +90,10 @@ def train_dt(
         model.train()
         train_loss = 0.0
         n_batches = 0
-        for batch in train_loader:
-            states = batch["states"].to(device)
-            actions = batch["actions"].to(device)
-            rtg = batch["rtg"].to(device)
-            mask = batch["mask"].to(device)
-            target = batch["target_action"].to(device)
-
-            pred = model(states, actions, rtg, mask)
-            pred = torch.nan_to_num(pred, nan=1.0 / action_dim)
-            pred = pred / (pred.sum(dim=-1, keepdim=True) + 1e-8)
-            loss = torch.nn.functional.mse_loss(pred[:, -1, :], target)
+        for batch_idx in buffer.train_batch_indices(batch_size, steps_per_epoch):
+            batch = buffer.sample_batch(batch_idx)
+            pred = model(batch["states"], batch["actions"], batch["rtg"], batch["mask"])
+            loss = torch.nn.functional.mse_loss(pred[:, -1, :], batch["target_action"])
 
             optimizer.zero_grad()
             loss.backward()
@@ -117,16 +108,10 @@ def train_dt(
         val_loss = 0.0
         n_val_batches = 0
         with torch.no_grad():
-            for batch in val_loader:
-                states = batch["states"].to(device)
-                actions = batch["actions"].to(device)
-                rtg = batch["rtg"].to(device)
-                mask = batch["mask"].to(device)
-                target = batch["target_action"].to(device)
-                pred = model(states, actions, rtg, mask)
-                pred = torch.nan_to_num(pred, nan=1.0 / action_dim)
-                pred = pred / (pred.sum(dim=-1, keepdim=True) + 1e-8)
-                loss = torch.nn.functional.mse_loss(pred[:, -1, :], target)
+            for batch_idx in buffer.val_batches(batch_size):
+                batch = buffer.sample_batch(batch_idx)
+                pred = model(batch["states"], batch["actions"], batch["rtg"], batch["mask"])
+                loss = torch.nn.functional.mse_loss(pred[:, -1, :], batch["target_action"])
                 val_loss += loss.item()
                 n_val_batches += 1
 
@@ -134,8 +119,7 @@ def train_dt(
         val_loss /= max(n_val_batches, 1)
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
 
-        if epoch % 1 == 0:
-            print(f"  [{model_name}] epoch {epoch+1}/{max_epochs} train={train_loss:.5f} val={val_loss:.5f}")
+        print(f"  [{model_name}] epoch {epoch+1}/{max_epochs} train={train_loss:.5f} val={val_loss:.5f}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -149,7 +133,6 @@ def train_dt(
                 "epoch": epoch,
             }, ckpt_path)
 
-    # Save training log
     log_path = log_dir / f"{model_name}_seed{seed}_history.csv"
     with open(log_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "val_loss"])
@@ -161,20 +144,20 @@ def train_dt(
 
 def train_offline_rl(cfg: Config, algo: str, seed: int = 42) -> Path:
     """Train an offline RL algorithm."""
+    _setup_training(cfg)
     torch.manual_seed(seed)
     device = get_device(cfg)
-    dataset = load_trajectory_dataset(cfg)
-    state_dim = dataset.states.shape[2]
-    action_dim = dataset.actions.shape[2]
-    batch_size = int(cfg.get("model", "batch_size", default=64))
+    batch_size = int(cfg.get("model", "batch_size", default=256))
     max_epochs = int(cfg.get("model", "max_epochs", default=50))
+    steps_per_epoch = cfg.get("training", "steps_per_epoch", default=None)
+    if steps_per_epoch is not None:
+        steps_per_epoch = int(steps_per_epoch)
 
-    max_samples = int(cfg.get("model", "max_train_samples", default=0))
-    if max_samples > 0 and len(dataset) > max_samples:
-        indices = torch.randperm(len(dataset))[:max_samples].tolist()
-        dataset = torch.utils.data.Subset(dataset, indices)
-
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+    buffer = GPUTrajectoryBuffer(
+        cfg, device, last_state_only=True, seed=seed
+    )
+    state_dim = buffer.state_dim
+    action_dim = buffer.n_assets
 
     algo_map = {
         "td3bc": TD3BC,
@@ -187,7 +170,8 @@ def train_offline_rl(cfg: Config, algo: str, seed: int = 42) -> Path:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(max_epochs):
-        for batch in loader:
+        for batch_idx in buffer.train_batch_indices(batch_size, steps_per_epoch):
+            batch = buffer.sample_batch(batch_idx)
             agent.train_step(batch)
 
     ckpt_path = ckpt_dir / f"{algo}_seed{seed}.pt"
@@ -197,20 +181,20 @@ def train_offline_rl(cfg: Config, algo: str, seed: int = 42) -> Path:
 
 def train_online_rl(cfg: Config, algo: str, seed: int = 42) -> Path:
     """Train an online RL algorithm (reference only)."""
+    _setup_training(cfg)
     torch.manual_seed(seed)
     device = get_device(cfg)
-    dataset = load_trajectory_dataset(cfg)
-    state_dim = dataset.states.shape[2]
-    action_dim = dataset.actions.shape[2]
-    batch_size = int(cfg.get("model", "batch_size", default=64))
+    batch_size = int(cfg.get("model", "batch_size", default=256))
     max_epochs = int(cfg.get("model", "max_epochs", default=50))
+    steps_per_epoch = cfg.get("training", "steps_per_epoch", default=None)
+    if steps_per_epoch is not None:
+        steps_per_epoch = int(steps_per_epoch)
 
-    max_samples = int(cfg.get("model", "max_train_samples", default=0))
-    if max_samples > 0 and len(dataset) > max_samples:
-        indices = torch.randperm(len(dataset))[:max_samples].tolist()
-        dataset = torch.utils.data.Subset(dataset, indices)
-
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+    buffer = GPUTrajectoryBuffer(
+        cfg, device, last_state_only=True, seed=seed
+    )
+    state_dim = buffer.state_dim
+    action_dim = buffer.n_assets
 
     algo_map = {"ppo": PPO, "sac": SAC, "a2c": A2C}
     agent = algo_map[algo](state_dim, action_dim, device=device)
@@ -219,7 +203,8 @@ def train_online_rl(cfg: Config, algo: str, seed: int = 42) -> Path:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(max_epochs):
-        for batch in loader:
+        for batch_idx in buffer.train_batch_indices(batch_size, steps_per_epoch):
+            batch = buffer.sample_batch(batch_idx)
             agent.train_step(batch)
 
     ckpt_path = ckpt_dir / f"{algo}_seed{seed}.pt"
