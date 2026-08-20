@@ -182,6 +182,35 @@ def normalize_states(states: np.ndarray, norm_stats: dict[str, np.ndarray]) -> n
     return np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
 
+def _feature_fingerprint(cfg: Config) -> dict[str, Any]:
+    return {
+        "universe": cfg.get("data", "universe", default="A"),
+        "start_date": cfg.get("data", "start_date"),
+        "end_date": cfg.get("data", "end_date"),
+        "lookback": int(cfg.get("data", "lookback", default=20)),
+        "feature_set": cfg.get("data", "feature_set", default="full"),
+        "train_start": cfg.get("splits", "train_start", default="2000-09-01"),
+        "train_end": cfg.get("splits", "train_end", default="2016-12-31"),
+    }
+
+
+def build_or_load_features(bundle: MarketDataBundle, cfg: Config) -> FeatureBundle:
+    """Build features or load cached states.npy when fingerprint matches."""
+    root = cfg.project_root
+    out_dir = root / "data" / "processed"
+    meta_path = out_dir / "feature_meta.json"
+    states_path = out_dir / "states.npy"
+    fingerprint = _feature_fingerprint(cfg)
+
+    if meta_path.exists() and states_path.exists():
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        if meta.get("fingerprint") == fingerprint:
+            return load_features(cfg)
+
+    return build_features(bundle, cfg)
+
+
 def build_features(
     bundle: MarketDataBundle,
     cfg: Config,
@@ -241,6 +270,7 @@ def save_features(fb: FeatureBundle, cfg: Config) -> Path:
         "lookback": fb.lookback,
         "n_assets": fb.n_assets,
         "state_dim": fb.states.shape[1],
+        "fingerprint": _feature_fingerprint(cfg),
     }
     with open(out_dir / "feature_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
