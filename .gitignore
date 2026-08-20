@@ -1,1 +1,38 @@
-.venv
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data artifacts
+data/processed/
+data/trajectories/
+results/checkpoints/
+results/runs/
+results/figures/
+!results/figures/.gitkeep
+!results/tables/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# TensorBoard
+runs/
+lightning_logs/
