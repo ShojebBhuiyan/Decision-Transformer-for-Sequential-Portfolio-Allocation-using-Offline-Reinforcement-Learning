@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,17 +21,21 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.shape
         qkv = self.qkv(x).reshape(B, T, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
-        att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        # Causal mask
-        causal = torch.tril(torch.ones(T, T, device=x.device)).unsqueeze(0).unsqueeze(0)
-        att = att.masked_fill(causal == 0, float("-inf"))
+
+        causal = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
+        allowed = causal.view(1, 1, T, T).expand(B, self.n_heads, -1, -1)
         if mask is not None:
-            # mask: (B, T) -> expand for attention
-            pad_mask = mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, T)
-            att = att.masked_fill(pad_mask == 0, float("-inf"))
-        att = F.softmax(att, dim=-1)
-        att = self.dropout(att)
-        out = (att @ v).transpose(1, 2).reshape(B, T, C)
+            pad_mask = mask.bool().unsqueeze(1).unsqueeze(2)
+            allowed = allowed & pad_mask
+        # Guarantee diagonal is always attendable (prevents all-masked rows -> NaN)
+        eye = torch.eye(T, device=x.device, dtype=torch.bool).view(1, 1, T, T)
+        allowed = allowed | eye
+
+        dropout_p = self.dropout.p if self.training else 0.0
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=allowed, dropout_p=dropout_p
+        )
+        out = out.transpose(1, 2).reshape(B, T, C)
         return self.proj(out)
 
 
