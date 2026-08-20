@@ -11,13 +11,14 @@ import pandas as pd
 
 from src.config import Config
 from src.data_loader import compute_price_returns, get_split_mask, load_processed_data
-from src.eval.backtest import backtest_all_baselines, backtest_policy
+from src.eval.backtest import backtest_policy
 from src.eval.metrics import compute_all_metrics
 from src.eval.model_policy import (
     load_learned_policies,
     parse_manifest_key,
 )
 from src.eval.rtg_calibration import run_rtg_calibration, save_rtg_calibration
+from src.eval.stats import significance_table
 from src.features import build_features, load_features
 from src.policies import Policy, get_classical_baselines
 
@@ -42,18 +43,35 @@ def evaluate_split(
     risk_free_rate: float,
 ) -> pd.DataFrame:
     """Evaluate classical baselines on a date split."""
+    df, _series = evaluate_split_series(
+        price_returns, states, dates, start, end, transaction_cost, risk_free_rate
+    )
+    return df
+
+
+def evaluate_split_series(
+    price_returns: np.ndarray,
+    states: np.ndarray,
+    dates: pd.DatetimeIndex,
+    start: str,
+    end: str,
+    transaction_cost: float,
+    risk_free_rate: float,
+) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
+    """Classical baselines plus their log-return series."""
     mask = get_split_mask(dates, start, end)
     if mask.sum() == 0:
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
 
     split_returns = price_returns[mask]
     split_states = states[mask]
-    n_assets = price_returns.shape[1]
-    baselines = get_classical_baselines(n_assets)
-
-    return backtest_all_baselines(
-        split_returns, baselines, split_states, transaction_cost
+    baselines = get_classical_baselines(price_returns.shape[1])
+    df, series = _backtest_named_policies(
+        baselines, split_returns, split_states, transaction_cost, risk_free_rate
     )
+    if df.empty:
+        return df, series
+    return df.set_index("strategy"), series
 
 
 def _backtest_named_policies(
@@ -92,9 +110,28 @@ def evaluate_learned(
     policies: dict[str, Policy] | None = None,
 ) -> pd.DataFrame:
     """Backtest trained checkpoints on a date split (one row per seed)."""
+    df, _series = evaluate_learned_series(
+        cfg, price_returns, states, dates, start, end,
+        transaction_cost, risk_free_rate, policies,
+    )
+    return df
+
+
+def evaluate_learned_series(
+    cfg: Config,
+    price_returns: np.ndarray,
+    states: np.ndarray,
+    dates: pd.DatetimeIndex,
+    start: str,
+    end: str,
+    transaction_cost: float,
+    risk_free_rate: float,
+    policies: dict[str, Policy] | None = None,
+) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
+    """Learned-model backtest plus per-checkpoint log-return series."""
     mask = get_split_mask(dates, start, end)
     if mask.sum() == 0:
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
 
     if policies is None:
         policies = load_learned_policies(
@@ -105,20 +142,20 @@ def evaluate_learned(
             "No trained checkpoints found in training_manifest.json; "
             "learned-model evaluation skipped."
         )
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
 
     split_returns = price_returns[mask]
     split_states = states[mask]
-    df, _series = _backtest_named_policies(
+    df, series = _backtest_named_policies(
         policies, split_returns, split_states, transaction_cost, risk_free_rate
     )
     if df.empty:
-        return df
+        return df, series
 
     parsed = df["strategy"].map(parse_manifest_key)
     df["seed"] = parsed.map(lambda x: x[1])
     df["strategy"] = parsed.map(lambda x: x[0])
-    return df
+    return df, series
 
 
 def aggregate_learned_metrics(df: pd.DataFrame) -> pd.DataFrame:
@@ -154,14 +191,20 @@ def run_evaluation(cfg: Config) -> pd.DataFrame:
 
     results = {}
 
-    # Headline splits
+    # Headline splits (train/val); test is computed with series for stats
     for split_name, start, end in [
         ("train", cfg.get("splits", "train_start"), cfg.get("splits", "train_end")),
         ("val", cfg.get("splits", "val_start"), cfg.get("splits", "val_end")),
-        ("test", cfg.get("splits", "test_start"), cfg.get("splits", "test_end")),
     ]:
         df = evaluate_split(returns_aligned, fb.states, fb.dates, start, end, tc, rf)
         results[split_name] = df
+
+    test_start = cfg.get("splits", "test_start")
+    test_end = cfg.get("splits", "test_end")
+    test_df, test_series = evaluate_split_series(
+        returns_aligned, fb.states, fb.dates, test_start, test_end, tc, rf
+    )
+    results["test"] = test_df
 
     # Walk-forward folds
     wf_results = []
@@ -173,13 +216,13 @@ def run_evaluation(cfg: Config) -> pd.DataFrame:
             wf_results.append(df)
 
     # Learned models on the headline test split
-    learned_df = evaluate_learned(
+    learned_df, learned_series = evaluate_learned_series(
         cfg,
         returns_aligned,
         fb.states,
         fb.dates,
-        cfg.get("splits", "test_start"),
-        cfg.get("splits", "test_end"),
+        test_start,
+        test_end,
         tc,
         rf,
     )
@@ -202,9 +245,16 @@ def run_evaluation(cfg: Config) -> pd.DataFrame:
 
     cal_df = run_rtg_calibration(
         cfg, returns_aligned, fb.states, fb.dates,
-        cfg.get("splits", "test_start"), cfg.get("splits", "test_end"), tc,
+        test_start, test_end, tc,
     )
     save_rtg_calibration(cfg, cal_df)
+
+    all_series = {**test_series, **learned_series}
+    if "buy_and_hold" in all_series:
+        sig = significance_table(all_series, benchmark="buy_and_hold", risk_free_rate=rf)
+        sig.to_csv(out_dir / "significance_tests.csv", index=False)
+    else:
+        sig = pd.DataFrame()
 
     if wf_results:
         wf_df = pd.concat(wf_results)
@@ -221,6 +271,7 @@ def run_evaluation(cfg: Config) -> pd.DataFrame:
         "n_folds": len(wf_results),
         "n_learned_rows": int(len(learned_df)),
         "n_rtg_calibration_rows": int(len(cal_df)),
+        "n_significance_rows": int(len(sig)),
     }
     with open(out_dir / "eval_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, default=str)
