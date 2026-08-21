@@ -11,68 +11,122 @@
 \maketitle
 
 \begin{abstract}
-We frame multi-asset portfolio allocation as an offline sequence-modeling problem using a Decision Transformer (DT). Historical market trajectories synthesized from diverse behavior policies (mean-variance, momentum, equal-weight, noisy rollouts) train a causal transformer to predict portfolio weights conditioned on Return-to-Go (RTG). We evaluate on 30 years of daily close prices (1995--2025) across a 14-asset Universe~A with cash and synthetic bond exposure, benchmarking against classical strategies, Behavior Cloning, and offline RL methods (TD3+BC, IQL, CQL).
+We frame multi-asset portfolio allocation as an offline sequence-modeling problem using a Decision Transformer (DT). Historical trajectories synthesized from 18 behavior policies train a causal transformer to predict simplex portfolio weights conditioned on Return-to-Go (RTG). On Universe~A (14 assets, 2000--2025) we train DT, transformer behavior cloning (BC), and six RL baselines across five seeds, then backtest on 2020--2025. No learned method beats buy-and-hold on Sharpe after 10\,bp proportional costs. DT tracks BC almost exactly (Sharpe $0.97\pm0.12$ vs.\ $0.98\pm0.09$), and an RTG-quantile sweep is essentially flat, indicating unused return conditioning. Momentum attains the highest test CAGR (27.1\%) at the cost of turnover and drawdown; PPO collapses to equal weights.
 \end{abstract}
 
 \section{Introduction}
-Online reinforcement learning in financial markets is impractical due to transaction costs, non-stationarity, and the inability to replay history. Offline RL and sequence modeling offer an alternative: learn from fixed historical trajectories without environment interaction. The Decision Transformer~\cite{chen2021dt} reformulates RL as autoregressive modeling over $(\hat{R}_t, s_t, a_t)$ tuples, enabling conditioning on desired future returns at inference.
+Online reinforcement learning in financial markets is impractical due to transaction costs, non-stationarity, and the inability to replay history. Offline RL and sequence modeling offer an alternative: learn from fixed historical trajectories without environment interaction. The Decision Transformer~\cite{chen2021dt} reformulates RL as autoregressive modeling over $(\hat{R}_t, s_t, a_t)$ tuples, enabling conditioning on desired future returns at inference. We ask whether that conditioning improves sequential long-only allocation relative to classical policies and standard offline RL.
 
 \section{Problem Formulation}
-We define a Markov Decision Process over $N=14$ investable assets plus cash:
+We define a Markov Decision Process over $N=14$ investable assets (including cash and a synthetic 10-year bond):
 \begin{align}
-    s_t &= (w'_{t-1}, X_t, I_t), \quad a_t \in \Delta^N, \\
+    s_t &= X_t, \quad a_t \in \Delta^{N-1}, \\
     R_t &= \ln\!\left(a_t^\top y_t - \mu \sum_i |w_{i,t} - w'_{i,t-1}|\right),
 \end{align}
-where $y_t$ is the relative price return vector, $\mu=0.001$ is the proportional transaction cost, and $\hat{R}_t = \sum_{t'=t}^{T} R_{t'}$ is the undiscounted Return-to-Go.
+where $y_t$ is the relative price-return vector, $\mu=0.001$ is the proportional transaction cost, and $\hat{R}_t = \sum_{t'=t}^{T} R_{t'}$ is the undiscounted Return-to-Go. Actions are long-only and sum to one (probability simplex).
 
 \section{Data}
-We use the 30-year Stock Market Dataset (1995--2025) with daily closing prices for indices, equities, commodities, currencies, and bonds. After aligning to NYSE trading days and constructing Universe~A (2000-09-01 onward), we obtain 6,369 trading days. Non-investable series (VIX, WTI, term spreads) serve as state features only.
+We use daily closing prices from the 30-year market dataset (1995--2025). After NYSE calendar alignment, limited forward-fill, and Universe~A construction from 2000-09-01 through 2025-12-30, we obtain 6{,}369 trading days. Feature states additionally flatten a 20-day lookback of per-asset returns, technical indicators, macro series, and event flags (state dimension 2{,}580). Non-investable series (VIX, WTI, term spreads) are features only. Train / validation / test splits are 2000--2016 / 2017--2019 / 2020--2025 (1{,}507 test days).
 
 \section{Methods}
 \subsection{Trajectory Synthesis}
-Behavior policies generate 540 episodes of length $T=252$ from the training window (2000--2016): MVO (Ledoit-Wolf), min-variance, risk parity, momentum, equal-weight, buy-and-hold, plus Dirichlet-noisy variants.
+Eighteen behavior policies generate 3{,}600 episodes of length $T=252$ on the training window: buy-and-hold, equal-weight, mean-variance (Ledoit--Wolf), min-variance, risk parity, momentum, Dirichlet-noisy variants of MVO/momentum/equal-weight ($\alpha\in\{5,15,50\}$), and random Dirichlet ($\alpha\in\{0.5,1,2\}$). Rewards use the same log-return cost model as evaluation. RTG is stored undiscounted and standardized with training statistics ($\mu_{\mathrm{RTG}}=-0.002$, $\sigma_{\mathrm{RTG}}=0.139$).
 
 \subsection{Decision Transformer}
-A causal GPT with $K=30$ context, $d_{\text{model}}=128$, 3 layers, and 4 heads embeds interleaved RTG/state/action tokens. A softmax head enforces simplex constraints. Training minimizes MSE on action predictions.
+A causal GPT with context $K=30$, $d_{\mathrm{model}}=192$, 4 layers, and 6 heads embeds interleaved (RTG, state, action) tokens. A softmax head enforces the simplex. Training minimizes MSE on the last-step action for 50 epochs, 200 steps per epoch, batch size 256, AdamW at $10^{-4}$, across seeds $\{42,123,456,789,1011\}$. At inference the RTG budget starts at the 90th percentile of training episode returns and decrements by the realized log reward; every 252 steps the budget is reset so multi-year rollouts stay in-distribution relative to training episodes.
 
 \subsection{Baselines}
-Classical: buy-and-hold, equal-weight, MVO, min-variance, risk parity, momentum. Imitation: transformer BC (no RTG). Offline RL: TD3+BC, IQL, CQL. Online RL (reference): PPO, SAC, A2C.
+Classical: buy-and-hold, equal-weight, mean-variance, min-variance, risk parity, momentum. Imitation: transformer BC (same backbone, no RTG). Offline RL: TD3+BC, IQL, CQL. Online-style reference methods trained on the offline buffer (not true environment interaction): PPO, SAC, A2C.
 
 \section{Experiments}
-\textbf{Splits:} Train 2000--2016, validation 2017--2019, test 2020--2025. Walk-forward folds cover six 2-year blocks.
+\textbf{Metrics:} CAGR, Sharpe (2\% annual risk-free rate), Sortino, Calmar, maximum drawdown, mean daily turnover, VaR/CVaR.
 
-\textbf{Metrics:} CAGR, Sharpe, Sortino, Calmar, maximum drawdown, turnover, VaR/CVaR.
+\textbf{Inference:} Each of 40 checkpoints is rolled out on the test window. Learned tables report the mean across five seeds. Walk-forward uses six 2-year folds; folds starting on or before 2016-12-31 are in-sample and are not read as performance.
+
+\textbf{Statistics:} Circular block-bootstrap 95\% CIs (block size 20, 1{,}000 replicates) and Ledoit--Wolf tests compare each Sharpe to buy-and-hold. Deflated Sharpe~\cite{bailey2014dsr} uses $n_{\mathrm{trials}}=46$ (every classical strategy and every seed).
 
 \section{Results}
-Table~\ref{tab:test} summarizes classical baseline performance on the test period. Momentum achieves the highest cumulative return (320\%) but with elevated turnover (151\%). Mean-variance and buy-and-hold deliver comparable risk-adjusted performance (Sharpe $\approx$ 1.12).
+
+\subsection{Headline test period (2020--2025)}
+Table~\ref{tab:test} reports classical baselines; Table~\ref{tab:learned} reports learned methods (mean $\pm$ std over seeds).
+
+Buy-and-hold and equal-weight coincide on this universe (identical Sharpe $1.12$, CAGR $23.7\%$, max drawdown $-23.3\%$). Mean-variance is statistically indistinguishable from buy-and-hold (Sharpe difference $-0.003$, bootstrap CI $[-0.07,0.05]$). Momentum posts the highest CAGR ($27.1\%$) with Sharpe $0.97$, a deeper drawdown ($-32.0\%$), and $15.1\%$ mean daily turnover. Risk parity fails ($0.6\%$ CAGR, Sharpe $-0.18$).
 
 \begin{table}[h]
 \centering
-\caption{Test period (2020--2025) classical baseline metrics.}
+\caption{Test period (2020--2025), Universe~A, classical baselines. Turnover is mean daily $L_1$ turnover.}
 \label{tab:test}
 \begin{tabular}{lrrrr}
 \toprule
 Strategy & CAGR & Sharpe & Max DD & Turnover \\
 \midrule
-Momentum & 0.271 & 0.973 & -0.320 & 0.151 \\
-Mean-Variance & 0.238 & 1.118 & -0.233 & 0.002 \\
-Buy-and-Hold & 0.237 & 1.118 & -0.233 & $\sim 0$ \\
-Min-Variance & 0.236 & 1.118 & -0.233 & $\sim 0$ \\
-Risk Parity & 0.006 & -0.178 & -0.233 & 0.001 \\
+Momentum       & 0.271 & 0.973 & $-0.320$ & 0.151 \\
+Mean-variance  & 0.242 & 1.116 & $-0.233$ & 0.007 \\
+Buy-and-hold   & 0.237 & 1.118 & $-0.233$ & $\sim 0$ \\
+Equal-weight   & 0.237 & 1.118 & $-0.233$ & $\sim 0$ \\
+Min-variance   & 0.235 & 1.116 & $-0.233$ & $\sim 0$ \\
+Risk parity    & 0.006 & $-0.178$ & $-0.233$ & 0.001 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The Decision Transformer trains successfully (val MSE $\approx 0.009$) on minimal feature states (returns + macro + events, lookback 10). Full GPU training with complete feature sets and 5 seeds is recommended for publication-quality DT vs.\ baseline comparisons.
+\begin{table}[h]
+\centering
+\caption{Test period (2020--2025), learned methods. Mean across five seeds; Sharpe std in parentheses. DT is conditioned at the 90th-percentile training RTG.}
+\label{tab:learned}
+\begin{tabular}{lrrrr}
+\toprule
+Strategy & CAGR & Sharpe & Max DD & Turnover \\
+\midrule
+PPO$^\dagger$ & 0.237 & $1.118$ $(0.000)$ & $-0.233$ & $\sim 0$ \\
+SAC           & 0.222 & $1.039$ $(0.143)$ & $-0.248$ & 0.058 \\
+BC            & 0.219 & $0.976$ $(0.095)$ & $-0.267$ & 0.059 \\
+DT            & 0.215 & $0.966$ $(0.119)$ & $-0.272$ & 0.061 \\
+IQL           & 0.196 & $0.818$ $(0.183)$ & $-0.303$ & 0.127 \\
+CQL           & 0.343 & $0.781$ $(0.191)$ & $-0.499$ & 0.195 \\
+TD3+BC        & 0.190 & $0.660$ $(0.234)$ & $-0.351$ & 0.135 \\
+A2C           & $-0.014$ & $-0.127$ $(0.338)$ & $-0.539$ & 1.139 \\
+\bottomrule
+\multicolumn{5}{l}{\footnotesize $^\dagger$PPO is identical to buy-and-hold on every seed (Dirichlet mean collapsed to uniform).}
+\end{tabular}
+\end{table}
+
+DT does not improve on BC: mean Sharpes $0.966$ vs.\ $0.976$, with overlapping seed ranges. Neither beats buy-and-hold. Block-bootstrap CIs for DT versus buy-and-hold exclude zero (DT worse) on two of five seeds; the other three CIs include zero. CQL has the highest mean CAGR ($34.3\%$) but Sharpe only $0.78$ because volatility ($34.6\%$) and max drawdown ($-50\%$) explode; seed 789 alone posts $53\%$ CAGR. A2C is unstable (turnover $>1$ per day). With $n_{\mathrm{trials}}=46$, every deflated Sharpe is $\approx 0$: after selection-bias correction, no strategy, including buy-and-hold, is distinguishable from luck.
+
+\subsection{RTG calibration}
+Sweeping target RTG over training-episode quantiles $\{0.1,0.25,0.5,0.75,0.9\}$ (budget reset every 252 days) yields nearly identical realized log returns (mean $\approx 1.17$ across quantiles). Mean Sharpe by quantile is $1.01$, $1.00$, $1.00$, $0.97$, $0.97$---slightly \emph{inverse}. Conditioning on a higher desired return does not produce a higher realized return, consistent with DT $\approx$ BC.
+
+\subsection{Walk-forward (out of sample)}
+Table~\ref{tab:wf} shows Sharpe on the four folds that begin after the training cutoff. Learned policies follow buy-and-hold through the 2022--2023 drawdown and the 2024--2025 rally but never lead. Momentum wins 2020--2021 and loses 2022--2023. In-sample folds (2014--2017) are omitted as performance claims.
+
+\begin{table}[h]
+\centering
+\caption{Out-of-sample walk-forward Sharpe. Learned entries are means across five seeds.}
+\label{tab:wf}
+\begin{tabular}{lrrrrrr}
+\toprule
+Fold & BAH & Mom.\ & DT & BC & SAC & CQL \\
+\midrule
+2018--2019 & 0.80 & 0.86 & 0.79 & 0.78 & 0.79 & 0.19 \\
+2020--2021 & 1.24 & 1.32 & 1.07 & 1.06 & 1.09 & 0.95 \\
+2022--2023 & 0.33 & 0.07 & 0.25 & 0.28 & 0.33 & $-0.02$ \\
+2024--2025 & 1.94 & 1.38 & 1.84 & 1.85 & 1.87 & 1.44 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Discussion}
-\textbf{Limitations:} Close-only data precludes volume-based indicators. CPU training used reduced epochs and subsampled trajectories. WTI negative prices (2020-04-20) require feature-only treatment. Online RL baselines use environment interaction and are not directly comparable to offline methods.
+On this close-only, long-only universe, a cost-aware equal-weight/buy-and-hold portfolio is a formidable baseline. Sequence models reproduce that allocation with extra turnover and do not extract a Sharpe premium from RTG. Offline RL either collapses (PPO), underperforms (TD3+BC, IQL), or inflates return by taking more risk (CQL). The ``online'' agents are single-step updates on an offline buffer and should not be read as a fair online comparison.
 
-\textbf{Future work:} CUDA training with full feature set, RTG calibration curves, Universe~B crypto robustness, and statistical significance testing (block-bootstrap, deflated Sharpe).
+\textbf{Limitations.} Close-only data preclude volume or microstructure features. WTI's negative print (2020-04-20) is a feature only. The 252-day RTG reset is a methodological choice so that multi-year tests stay in-distribution; calibration is therefore per window, not against a single six-year target. Context-length and transaction-cost ablations, and Universe~B (Bitcoin + aluminum from 2014-09-17), were not part of this run.
+
+\textbf{Future work.} Universe~B robustness, $K\in\{10,20,30,50\}$ and $\mu$ sweeps, and a less punitive trial count for deflated Sharpe (algorithm-level rather than per-seed).
 
 \begin{thebibliography}{9}
 \bibitem{chen2021dt}
-L.~Chen et al., ``Decision Transformer: Reinforcement Learning via Sequence Modeling,'' NeurIPS 2021.
+L.~Chen, K.~Lu, A.~Rajeswaran, K.~Lee, A.~Grover, M.~Laskin, P.~Abbeel, A.~Srinivas, and I.~Mordatch, ``Decision Transformer: Reinforcement Learning via Sequence Modeling,'' NeurIPS, 2021.
+\bibitem{bailey2014dsr}
+D.~H.~Bailey and M.~L\'opez de Prado, ``The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality,'' \emph{J.~Portfolio Management}, 2014.
 \end{thebibliography}
 
 \end{document}
