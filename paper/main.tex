@@ -17,40 +17,97 @@ We frame multi-asset portfolio allocation as an offline sequence-modeling proble
 \section{Introduction}
 Online reinforcement learning in financial markets is impractical due to transaction costs, non-stationarity, and the inability to replay history. Offline RL and sequence modeling offer an alternative: learn from fixed historical trajectories without environment interaction. The Decision Transformer~\cite{chen2021dt} reformulates RL as autoregressive modeling over $(\hat{R}_t, s_t, a_t)$ tuples, enabling conditioning on desired future returns at inference. We ask whether that conditioning improves sequential long-only allocation relative to classical policies and standard offline RL.
 
-\section{Problem Formulation}
-We define a Markov Decision Process over $N=14$ investable assets (including cash and a synthetic 10-year bond):
-\begin{align}
-    s_t &= X_t, \quad a_t \in \Delta^{N-1}, \\
-    R_t &= \ln\!\left(a_t^\top y_t - \mu \sum_i |w_{i,t} - w'_{i,t-1}|\right),
-\end{align}
-where $y_t$ is the relative price-return vector, $\mu=0.001$ is the proportional transaction cost, and $\hat{R}_t = \sum_{t'=t}^{T} R_{t'}$ is the undiscounted Return-to-Go. Actions are long-only and sum to one (probability simplex).
+This paper specifies the allocation task as a finite-horizon MDP (Section~\ref{sec:mdp}), reports how each baseline is implemented and how it performs on the 2020--2025 holdout (Section~\ref{sec:baselines}), then describes the DT pipeline and remaining results. Section~\ref{sec:challenges} records engineering and scientific obstacles encountered in the work.
+
+\section{Problem Definition}
+\label{sec:mdp}
+We treat daily long-only rebalancing as a discrete-time, finite-horizon Markov Decision Process
+\[
+\mathcal{M} = \langle \mathcal{S}, \mathcal{A}, P, R, \gamma, \rho_0, T_{\mathrm{ep}} \rangle
+\]
+driven by an \emph{exogenous} price process. The agent cannot affect next-day market returns; it only chooses weights and pays turnover costs.
+
+\subsection{Time, assets, and prices}
+Let $t=0,\ldots,T-1$ index NYSE trading days and $i=1,\ldots,N$ index investable assets. Universe~A uses $N=14$:
+S\&P~500 ETF, Fidelity Growth, Apple, Microsoft, Amazon, Nvidia, JPMorgan, Walmart, Fidelity Energy, gold, silver, copper, a synthetic 10-year Treasury, and cash.
+Cash is a unit-value index of T-bill yields converted to daily simple returns $r^{\mathrm{cash}}_t = \max(y^{\mathrm{bill}}_t/100/252,\,0)$. The bond is a duration approximation $r^{\mathrm{bond}}_t \approx -D\,\Delta y^{10\mathrm{Y}}_t + y^{10\mathrm{Y}}_{t-1}/252$ with $D=8$, compounded into a price index. Relative (gross) price returns are
+\begin{equation}
+  y_t = \Bigl( \tfrac{p_{1,t}}{p_{1,t-1}},\ldots,\tfrac{p_{N,t}}{p_{N,t-1}} \Bigr)^\top \in \mathbb{R}^N_{>0},
+\end{equation}
+clipped below at $10^{-8}$. Non-investable series (VIX, WTI, USD, term spreads, international indices) enter the state only.
+
+\subsection{Action space}
+The action $a_t = w_t \in \mathcal{A}$ is a target allocation on the probability simplex
+\begin{equation}
+  \mathcal{A} = \Delta^{N-1}
+  = \bigl\{ w \in \mathbb{R}^N : w_i \ge 0,\; \textstyle\sum_{i=1}^N w_i = 1 \bigr\}.
+\end{equation}
+Shorting and leverage are forbidden. Implemented actors emit softmax (or Dirichlet-mean) vectors; any residual mass is renormalized. Initial holdings at episode start are equal weight $w_0 = \mathbf{1}/N$.
+
+\subsection{State space}
+The implemented observation is \emph{not} $(w_{t-1}, X_t)$. Previous weights do not enter the feature vector. Let $Z_t \in \mathbb{R}^{d_z}$ concatenate, on day $t$:
+per-asset one-day returns; MACD histogram, RSI(14), Bollinger \%b(20), realized vol at 20 and 60 days; cross-sectional momentum ranks at 60 and 120 days; macro (VIX level, USD return, 10Y--3M and 30Y--5Y spreads, WTI and natural-gas returns); and binary event-window flags. Missing entries are filled with 0. With lookback $L=20$,
+\begin{equation}
+  s_t = \mathrm{vec}\bigl(Z_{t-L+1:t}\bigr) \in \mathbb{R}^{d_s},\qquad d_s = 2580.
+\end{equation}
+Mean and standard deviation of $s_t$ are estimated on the training split only and applied to all dates.
+
+\subsection{Transition}
+Given a realized price path $\{y_t\}$, the transition is deterministic in the observation:
+\begin{equation}
+  P(s_{t+1}\mid s_t, a_t) = \mathbf{1}\bigl[s_{t+1}=s(t+1)\bigr].
+\end{equation}
+$a_t$ does not affect $s_{t+1}$. The environment stores the last target $w_t$ for the cost term only; it does \emph{not} drift holdings with $y_t$ before the next rebalance. Turnover is therefore $\lVert a_t - a_{t-1}\rVert_1$ against the previous \emph{target}, not against mark-to-market weights $w'_{t} \propto w_{t-1}\odot y_t$. That is a modeling choice (and a limitation).
+
+The episode terminates at $t=T_{\mathrm{ep}}$ (training: $T_{\mathrm{ep}}=252$; evaluation: the length of the date split). Terminal transitions do not bootstrap ($d_t=1$).
+
+\subsection{Reward}
+Proportional transaction cost $\mu=0.001$ (10\,bp of $L_1$ turnover) yields the net logarithmic return
+\begin{equation}
+  R(s_t,a_t) = R_t
+  = \ln\bigl(\max\{ a_t^\top y_t - \mu \lVert a_t - a_{t-1}\rVert_1,\; \varepsilon \}\bigr),
+\end{equation}
+with floor $\varepsilon=10^{-8}$ so that $\log$ is defined if costs exceed gross return. The objective is undiscounted finite-horizon return $\mathbb{E}[\sum_{t=0}^{T_{\mathrm{ep}}-1} R_t]$ ($\gamma=1$ for DT/RTG). Value-based RL agents internally bootstrap with $\gamma=0.99$.
+
+\subsection{Return-to-Go}
+For a trajectory of rewards $(R_0,\ldots,R_{T_{\mathrm{ep}}-1})$,
+\begin{equation}
+  \hat{R}_t = \sum_{t'=t}^{T_{\mathrm{ep}}-1} R_{t'}
+  \qquad (\gamma=1).
+\end{equation}
+DT consumes the standardized scalar $(\hat{R}_t - \mu_{\mathrm{RTG}})/\sigma_{\mathrm{RTG}}$ with $\mu_{\mathrm{RTG}}=-0.002$, $\sigma_{\mathrm{RTG}}=0.139$ from the training set. At inference the budget starts at a chosen quantile of $\{\hat{R}_0\}$ and updates $\hat{R}_{t+1}=\hat{R}_t-R_t$, resetting every 252 steps on multi-year tests.
+
+\subsection{Initial distribution and offline data}
+$\rho_0$ is uniform over valid training start dates (episode length 252, stride determined by sampling 200 windows per behavior policy). The offline dataset $\mathcal{D}=\{\tau_j\}_{j=1}^{3600}$ contains format-v2 tuples $(s,a,R,\hat{R})$ sharing a global state matrix. Learning is purely offline: no further interaction with $P$ during training except that PPO/SAC/A2C take single-step updates on buffer transitions (not a live market loop).
 
 \section{Data}
-We use daily closing prices from the 30-year market dataset (1995--2025). After NYSE calendar alignment, limited forward-fill, and Universe~A construction from 2000-09-01 through 2025-12-30, we obtain 6{,}369 trading days. Feature states additionally flatten a 20-day lookback of per-asset returns, technical indicators, macro series, and event flags (state dimension 2{,}580). Non-investable series (VIX, WTI, term spreads) are features only. Train / validation / test splits are 2000--2016 / 2017--2019 / 2020--2025 (1{,}507 test days).
+Daily closes from the 30-year market file (1995--2025) are aligned to days where S\&P~500 is non-null, forward-filled at most 5 sessions, then restricted to Universe~A from 2000-09-01 through 2025-12-30 (6{,}369 trading days). Splits: train 2000--2016, validation 2017--2019, test 2020--2025 (1{,}507 test days). Walk-forward uses six 2-year blocks; folds that start on or before 2016-12-31 overlap training and are flagged in-sample.
 
-\section{Methods}
-\subsection{Trajectory Synthesis}
-Eighteen behavior policies generate 3{,}600 episodes of length $T=252$ on the training window: buy-and-hold, equal-weight, mean-variance (Ledoit--Wolf), min-variance, risk parity, momentum, Dirichlet-noisy variants of MVO/momentum/equal-weight ($\alpha\in\{5,15,50\}$), and random Dirichlet ($\alpha\in\{0.5,1,2\}$). Rewards use the same log-return cost model as evaluation. RTG is stored undiscounted and standardized with training statistics ($\mu_{\mathrm{RTG}}=-0.002$, $\sigma_{\mathrm{RTG}}=0.139$).
+\section{Initial Baselines}
+\label{sec:baselines}
+All policies map $(t,s_t)$ to $a_t\in\Delta^{N-1}$ and are scored with the same reward, 2\% annualized risk-free rate for Sharpe/Sortino, and 252-day year. Classical methods use only $y_{<t}$ (no learned parameters). Learned methods see $s_t$ from Section~\ref{sec:mdp}.
 
-\subsection{Decision Transformer}
-A causal GPT with context $K=30$, $d_{\mathrm{model}}=192$, 4 layers, and 6 heads embeds interleaved (RTG, state, action) tokens. A softmax head enforces the simplex. Training minimizes MSE on the last-step action for 50 epochs, 200 steps per epoch, batch size 256, AdamW at $10^{-4}$, across seeds $\{42,123,456,789,1011\}$. At inference the RTG budget starts at the 90th percentile of training episode returns and decrements by the realized log reward; every 252 steps the budget is reset so multi-year rollouts stay in-distribution relative to training episodes.
+\subsection{Classical implementations}
+\paragraph{Buy-and-hold / equal-weight.}
+Both emit $a_t=\mathbf{1}/N$ every day. Because turnover is measured against the previous \emph{target} (always $\mathbf{1}/N$), both have $\approx 0$ turnover and therefore identical backtests on this cost model---they are the same policy under our MDP. A mark-to-market buy-and-hold would drift and differ; we do not simulate that.
 
-\subsection{Baselines}
-Classical: buy-and-hold, equal-weight, mean-variance, min-variance, risk parity, momentum. Imitation: transformer BC (same backbone, no RTG). Offline RL: TD3+BC, IQL, CQL. Online-style reference methods trained on the offline buffer (not true environment interaction): PPO, SAC, A2C.
+\paragraph{Momentum.}
+Lookback 60 days, long the top $k=\lfloor N/3\rfloor=4$ assets by trailing cumulative gross return $\prod y-1$, equal-weight among winners, else $\mathbf{1}/N$ if $t<60$.
 
-\section{Experiments}
-\textbf{Metrics:} CAGR, Sharpe (2\% annual risk-free rate), Sortino, Calmar, maximum drawdown, mean daily turnover, VaR/CVaR.
+\paragraph{Mean-variance (max-Sharpe).}
+On a 252-day window, estimate $\mu$ and Ledoit--Wolf covariance $\Sigma$, then 200 projected-gradient steps on the simplex: $w \leftarrow \Pi_{\Delta}(w - \eta(\mu-\Sigma w))$ with $\eta=0.05$. Fallback $\mathbf{1}/N$ until the window is full.
 
-\textbf{Inference:} Each of 40 checkpoints is rolled out on the test window. Learned tables report the mean across five seeds. Walk-forward uses six 2-year folds; folds starting on or before 2016-12-31 are in-sample and are not read as performance.
+\paragraph{Min-variance.}
+Same optimizer with gradient $2\Sigma w$ (variance, not Sharpe).
 
-\textbf{Statistics:} Circular block-bootstrap 95\% CIs (block size 20, 1{,}000 replicates) and Ledoit--Wolf tests compare each Sharpe to buy-and-hold. Deflated Sharpe~\cite{bailey2014dsr} uses $n_{\mathrm{trials}}=46$ (every classical strategy and every seed).
+\paragraph{Risk parity.}
+Inverse-volatility weights $w_i \propto 1/(\mathrm{std}_{60}(y_{\cdot,i})+10^{-8})$ on a 60-day window.
 
-\section{Results}
+\paragraph{Behavior mixture (training data only).}
+The offline buffer also includes Dirichlet-noisy copies of MVO, momentum, and equal-weight ($\alpha\in\{5,15,50\}$) and random Dirichlet($\alpha\in\{0.5,1,2\}$), 200 windows each, 18 policies, 3{,}600 episodes. These noisy policies are not evaluated as test strategies.
 
-\subsection{Headline test period (2020--2025)}
-Table~\ref{tab:test} reports classical baselines; Table~\ref{tab:learned} reports learned methods (mean $\pm$ std over seeds).
-
-Buy-and-hold and equal-weight coincide on this universe (identical Sharpe $1.12$, CAGR $23.7\%$, max drawdown $-23.3\%$). Mean-variance is statistically indistinguishable from buy-and-hold (Sharpe difference $-0.003$, bootstrap CI $[-0.07,0.05]$). Momentum posts the highest CAGR ($27.1\%$) with Sharpe $0.97$, a deeper drawdown ($-32.0\%$), and $15.1\%$ mean daily turnover. Risk parity fails ($0.6\%$ CAGR, Sharpe $-0.18$).
+\subsection{Classical results (test 2020--2025)}
+Table~\ref{tab:test} is the baseline report. Buy-and-hold/equal-weight Sharpe is $1.12$ (CAGR $23.7\%$, max DD $-23.3\%$). Mean- and min-variance are statistically indistinguishable from that (Sharpe differences $-0.003$, bootstrap CIs covering 0). Momentum has the best CAGR ($27.1\%$) with Sharpe $0.97$, DD $-32.0\%$, and $15.1\%$ mean daily turnover. Risk parity is a failed baseline (CAGR $0.6\%$, Sharpe $-0.18$): inverse-vol on this mix (cash, bond, commodities, megacap growth) over-weights the low-vol sleeve and does not capture the 2020--2025 equity run.
 
 \begin{table}[h]
 \centering
@@ -69,6 +126,27 @@ Risk parity    & 0.006 & $-0.178$ & $-0.233$ & 0.001 \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\subsection{Learned baseline implementations}
+All use the same 5 seeds $\{42,123,456,789,1011\}$, 50 epochs, 200 steps/epoch, batch 256, and simplex outputs. Actors/critics are two-layer MLPs (width 256) unless noted. Checkpoints store every \texttt{nn.Module} under a \texttt{modules} dict.
+
+\paragraph{Transformer BC.}
+Same GPT as DT ($K=30$, $d_{\mathrm{model}}=192$, 4 layers, 6 heads) but tokens are $(s,a)$ only. MSE on the last-step action.
+
+\paragraph{TD3+BC.}
+Twin critics, delayed actor, BC MSE on the dataset action, Polyak $\tau=0.005$, $\gamma=0.99$. Target $r+\gamma(1-d)\min_i Q_{\theta'_i}(s', \pi(s'))$.
+
+\paragraph{IQL.}
+Expectile value $V$ fitted to a \emph{target} $Q$; critic bootstraps $V(s')$; advantage-weighted BC actor; Polyak target $Q$.
+
+\paragraph{CQL.}
+Twin $Q$ plus CQL(H) penalty: $\mathrm{logsumexp}$ over 10 random simplex actions per state (not over the batch). Actor: $-\,Q$ plus BC MSE.
+
+\paragraph{PPO / SAC / A2C (reference).}
+Single-step updates on offline transitions, not environment interaction. PPO and SAC use a Dirichlet actor (concentration $\mathrm{softplus}(f(s))+1$); inference uses the Dirichlet mean. A2C uses softmax. These are not a fair online comparison.
+
+\subsection{Learned baseline results}
+Table~\ref{tab:learned} reports mean $\pm$ std over seeds (DT included for comparison; it is not a classical baseline).
 
 \begin{table}[h]
 \centering
@@ -91,13 +169,28 @@ A2C           & $-0.014$ & $-0.127$ $(0.338)$ & $-0.539$ & 1.139 \\
 \end{tabular}
 \end{table}
 
-DT does not improve on BC: mean Sharpes $0.966$ vs.\ $0.976$, with overlapping seed ranges. Neither beats buy-and-hold. Block-bootstrap CIs for DT versus buy-and-hold exclude zero (DT worse) on two of five seeds; the other three CIs include zero. CQL has the highest mean CAGR ($34.3\%$) but Sharpe only $0.78$ because volatility ($34.6\%$) and max drawdown ($-50\%$) explode; seed 789 alone posts $53\%$ CAGR. A2C is unstable (turnover $>1$ per day). With $n_{\mathrm{trials}}=46$, every deflated Sharpe is $\approx 0$: after selection-bias correction, no strategy, including buy-and-hold, is distinguishable from luck.
+PPO's Dirichlet mean is $\mathbf{1}/N$ on every seed---it reproduces the strongest classical baseline by collapsing, not by allocating. SAC is the only learned agent with mean Sharpe above 1.0 ($1.04\pm0.14$) and still trails buy-and-hold. BC is a tight clone of the behavior mixture (Sharpe $0.98\pm0.09$) and is the right control for DT. IQL and TD3+BC lose on both return and risk. CQL's mean CAGR ($34.3\%$) is the headline high-water mark but with Sharpe $0.78$, vol $34.6\%$, and max DD $-50\%$ (seed 789 alone has $53\%$ CAGR). A2C is unusable (daily turnover $>1$).
+
+\section{Decision Transformer}
+A causal GPT interleaves $(\hat{R},s,a)$ tokens. The action head is softmax. Loss is MSE on the last context step. Training matches the learned baselines (50 epochs $\times$ 200 steps, batch 256, AdamW $10^{-4}$, gradient clip 1.0). Inference zero-fills the current-step action slot (the causal mask already hides it). Default target is the 90th percentile of training $\hat{R}_0$.
+
+\section{Experiments}
+\textbf{Metrics:} CAGR, Sharpe, Sortino, Calmar, maximum drawdown, mean daily turnover, VaR/CVaR.
+
+\textbf{Inference:} Each of 40 checkpoints is rolled out on the test window. Walk-forward uses six 2-year folds.
+
+\textbf{Statistics:} Circular block-bootstrap 95\% CIs (block size 20, 1{,}000 replicates) and Ledoit--Wolf tests versus buy-and-hold. Deflated Sharpe~\cite{bailey2014dsr} uses $n_{\mathrm{trials}}=46$ (every classical row and every seed).
+
+\section{Additional Results}
+
+\subsection{DT versus BC and buy-and-hold}
+DT does not improve on BC (Sharpes $0.966$ vs.\ $0.976$). Neither beats buy-and-hold. Block-bootstrap CIs for DT versus buy-and-hold exclude zero (DT worse) on two of five seeds; the other three include zero. With $n_{\mathrm{trials}}=46$, every deflated Sharpe is $\approx 0$.
 
 \subsection{RTG calibration}
-Sweeping target RTG over training-episode quantiles $\{0.1,0.25,0.5,0.75,0.9\}$ (budget reset every 252 days) yields nearly identical realized log returns (mean $\approx 1.17$ across quantiles). Mean Sharpe by quantile is $1.01$, $1.00$, $1.00$, $0.97$, $0.97$---slightly \emph{inverse}. Conditioning on a higher desired return does not produce a higher realized return, consistent with DT $\approx$ BC.
+Sweeping target RTG over training-episode quantiles $\{0.1,0.25,0.5,0.75,0.9\}$ (budget reset every 252 days) yields nearly identical realized log returns (mean $\approx 1.17$). Mean Sharpe by quantile is $1.01$, $1.00$, $1.00$, $0.97$, $0.97$---slightly inverse. Conditioning on a higher desired return does not produce a higher realized return.
 
 \subsection{Walk-forward (out of sample)}
-Table~\ref{tab:wf} shows Sharpe on the four folds that begin after the training cutoff. Learned policies follow buy-and-hold through the 2022--2023 drawdown and the 2024--2025 rally but never lead. Momentum wins 2020--2021 and loses 2022--2023. In-sample folds (2014--2017) are omitted as performance claims.
+Table~\ref{tab:wf} shows Sharpe on folds that begin after the training cutoff. Learned policies follow buy-and-hold through 2022--2023 and 2024--2025 but never lead. Momentum wins 2020--2021 and loses 2022--2023.
 
 \begin{table}[h]
 \centering
@@ -115,12 +208,36 @@ Fold & BAH & Mom.\ & DT & BC & SAC & CQL \\
 \end{tabular}
 \end{table}
 
+\section{Challenges}
+\label{sec:challenges}
+
+\paragraph{Exogenous, cost-aware MDP versus a strong $1/N$.}
+Because $P$ does not depend on $a_t$ and $\mu>0$ taxes turnover, any deviation from a flat book must buy enough edge to cover costs. On 2020--2025 that bar was not cleared by DT, BC, or the offline RL suite. The coincidence of buy-and-hold and equal-weight under target-based turnover further inflates the baseline: a drifted buy-and-hold was never measured.
+
+\paragraph{RTG unused.}
+The scientific premise is return conditioning. Calibration is flat and DT $\approx$ BC, so the extra RTG channel is not used. Contributing factors include: (i)~standardizing $\hat{R}$ with a small $\sigma_{\mathrm{RTG}}=0.14$ while test paths last $\sim$1{,}500 days; (ii)~resetting the budget every 252 days, which severs a six-year target; (iii)~MSE-to-behavior-actions, which encourages cloning $\mathcal{D}$ rather than changing $a$ with $\hat{R}$.
+
+\paragraph{Correctness of offline RL.}
+Early agents used $s'=s$ (self-referential Bellman targets), never updated target networks, and computed CQL's $\mathrm{logsumexp}$ over the batch instead of over actions. IQL's $V$ chased live $Q$ (loss $10^4$). PPO Dirichlet concentrations hit NaN; A2C broke on post-v2 batch shapes. Checkpoints originally stored the algorithm \emph{name} rather than weights. These were fixed (real $s'$, Polyak, CQL(H), BC-anchored CQL actor) before the sweep; without them the learned table would be meaningless.
+
+\paragraph{Systems constraints.}
+A GTX~1070 (8\,GB, Pascal, no tensor cores) saturates at $\sim$1{,}300 samples/s. A full pass is $\sim$10.4~min/epoch; 5 seeds $\times$ 2 transformers $\times$ 50 full epochs is $\sim$87 hours, so training uses 200 steps/epoch ($\sim$3 data passes). GPU-resident buffers plus batch 256 caused OOM until storage defaulted to pinned CPU with optional residency. Right-aligned padding could mask an entire attention row (softmax NaN); the diagonal is now forced attendable. Index sampling originally drew a full \texttt{randperm} per batch ($O(\text{steps}\cdot n)$). Mixed precision was skipped: GP104 fp16 is far slower than fp32.
+
+\paragraph{Evaluation gaps that shaped the run.}
+Until checkpoint policies existed, tables contained only classical rows. Ablation runs overwrote \texttt{dt\_seed42.pt} across $K$. Universe~B shared \texttt{data/processed/}, so a B prepare would have destroyed A. The sweep is now resumable; this paper's numbers are Universe~A only (no $K$ or $\mu$ ablation, no B training).
+
+\paragraph{Statistics.}
+Counting every seed as a trial ($n=46$) makes deflated Sharpe vacuously zero, including for buy-and-hold. That is conservative to the point of being uninformative; an algorithm-level $n_{\mathrm{trials}}$ would be more appropriate and was not used here.
+
+\paragraph{Data.}
+Close-only series: no volume or microstructure. WTI on 2020-04-20 is negative and is a feature, not an investable asset. Vectorized Dirichlet sampling for noisy policies is statistically equivalent to per-day \texttt{dirichlet} but not bit-identical.
+
 \section{Discussion}
-On this close-only, long-only universe, a cost-aware equal-weight/buy-and-hold portfolio is a formidable baseline. Sequence models reproduce that allocation with extra turnover and do not extract a Sharpe premium from RTG. Offline RL either collapses (PPO), underperforms (TD3+BC, IQL), or inflates return by taking more risk (CQL). The ``online'' agents are single-step updates on an offline buffer and should not be read as a fair online comparison.
+On this close-only, long-only universe, a cost-aware $1/N$ policy is a formidable baseline. Sequence models reproduce it with extra turnover and do not extract a Sharpe premium from RTG. Offline RL either collapses (PPO), underperforms (TD3+BC, IQL), or inflates return by taking more risk (CQL). The ``online'' agents are buffer updates, not live interaction.
 
-\textbf{Limitations.} Close-only data preclude volume or microstructure features. WTI's negative print (2020-04-20) is a feature only. The 252-day RTG reset is a methodological choice so that multi-year tests stay in-distribution; calibration is therefore per window, not against a single six-year target. Context-length and transaction-cost ablations, and Universe~B (Bitcoin + aluminum from 2014-09-17), were not part of this run.
+\textbf{Limitations} not already in Section~\ref{sec:challenges}: Universe~B (Bitcoin + aluminum from 2014-09-17) and $K,\mu$ sweeps were out of scope for this run.
 
-\textbf{Future work.} Universe~B robustness, $K\in\{10,20,30,50\}$ and $\mu$ sweeps, and a less punitive trial count for deflated Sharpe (algorithm-level rather than per-seed).
+\textbf{Future work.} Universe~B, context-length and cost ablations, drifted (mark-to-market) buy-and-hold, RTG losses that penalize ignoring $\hat{R}$, and algorithm-level deflated Sharpe.
 
 \begin{thebibliography}{9}
 \bibitem{chen2021dt}
