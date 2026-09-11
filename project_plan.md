@@ -234,6 +234,8 @@ portfolio_dt/
 | 23 | Epoch sampling + checkpoint/manifest fixes | `fix(train): correct epoch sampling, checkpoints and sweep resilience` | done |
 | 24 | RL Bellman/target/CQL correctness | `fix(models): use real transitions and target networks in RL baselines` | done |
 | 25 | Training regression tests | `test: cover RL correctness and checkpoint round-trip` | done |
+| 26 | Paper ablations (K, cost, concentration) + figures | `feat(eval): context-length, cost and concentration ablations` | done |
+| 27 | Course term paper (`term_paper/`) | `docs(term-paper): write course term paper` | done |
 
 ---
 

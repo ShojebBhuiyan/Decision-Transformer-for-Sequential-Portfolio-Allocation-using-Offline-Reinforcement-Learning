@@ -34,6 +34,9 @@ A full offline RL research pipeline in `F:\Research\RL\` framing multi-asset por
 | [`paper/main.tex`](paper/main.tex) | LaTeX paper draft |
 | [`scripts/verify_training.py`](scripts/verify_training.py) | Smoke-trains every model and reloads each checkpoint |
 | [`scripts/run_universe_b.py`](scripts/run_universe_b.py) | Universe B pipeline (does not clobber Universe A) |
+| [`scripts/run_paper_ablations.py`](scripts/run_paper_ablations.py) | K sweep, transaction-cost sweep, portfolio-concentration table |
+| [`scripts/run_paper_figures.py`](scripts/run_paper_figures.py) | Convergence, equity-curve and ablation figures |
+| [`term_paper/main.tex`](term_paper/main.tex) | Course term paper (BibTeX bibliography in `myreferences.bib`) |
 | [`tests/`](tests/) | 58 unit tests (all passing) |
 
 ---
@@ -195,6 +198,49 @@ now covered by `tests/test_training_regressions.py`.
 5. **Significance** — circular block-bootstrap Sharpe CIs vs buy-and-hold, Ledoit-Wolf p-values, Bailey–Lopez de Prado deflated Sharpe with `n_trials` = number of evaluated strategies. Table: `results/tables/significance_tests.csv`.
 
 Universe A keeps legacy paths (`data/processed/`, `results/checkpoints/`, …). Universe B is isolated under `*/universe_B/` via `Config.artifact_scope`. Prepare + trajectories for B have been run (16 assets, 2816 days, 3600 episodes); B training is not.
+
+## Paper ablations (2026-09-11)
+
+Run outside `--stage ablations`, which retrains inside the evaluation path and is slower:
+
+| Script | Output | Cost |
+|--------|--------|------|
+| `run_paper_ablations.py --part cost` | `results/tables/ablation_transaction_cost.csv` — classical + DT/BC seed 42 at mu in {0, 5, 10, 25} bp | no training |
+| `run_paper_ablations.py --part conc` | `results/tables/portfolio_concentration.csv` — mean test-window weights, HHI, top-3 holdings per model | no training |
+| `run_paper_ablations.py --part k` | `results/tables/ablation_context_length.csv` — DT retrained at K in {10, 20, 50}, K=30 reuses `dt_seed42.pt` | ~1 h on a GTX 1070 |
+| `run_paper_figures.py` | `results/figures/paper/{convergence,cost_sensitivity,context_length,equity_curves}.png` | seconds |
+
+Headline findings folded into the paper:
+
+- DT (Sharpe 0.966 +/- 0.133) is indistinguishable from its RTG-free control (0.976 +/- 0.106);
+  RTG conditioning buys a 1.2e-5 (0.4%) lower validation MSE and no allocation advantage.
+- The target-RTG sweep is flat and slightly inverse: a 0.51 swing in target moves realized
+  Sharpe by 0.040, downwards.
+- Transaction cost explains about half the DT gap, not all of it. Averaged over five seeds,
+  DT scores 1.047 at mu = 0 and 0.966 at 10 bp against equal weight's 1.118: of the 0.152 total
+  deficit, 0.072 is holding a worse book when trading is free and 0.081 is the cost of the churn.
+  Momentum's frictionless Sharpe edge (1.141) disappears at ~1.4 bp; its CAGR edge lasts to
+  ~17 bp.
+- **On four of five seeds DT's mean book is equal weight plus noise** (HHI 0.0715 vs a uniform
+  0.0714, largest mean weight 7.5-7.9% vs 7.1%, top holdings effectively arbitrary). Only the
+  high-turnover seed 42 holds a real megacap tilt (HHI 0.085, Nvidia 14%). DT and BC agree to
+  the fourth decimal of HHI seed by seed.
+- Context length is uninformative: validation MSE varies by 0.3% over K in {10, 20, 30, 50}
+  (3.298-3.309e-3) and no K beats the K=30 five-seed mean.
+- **DT/BC training is bimodal in turnover, and the mode is set by the seed.** Seeds 123/456/789/
+  1011 give ~4.3% mean daily turnover and Sharpe 0.95-1.09; seed 42 gives 13.6% (DT) / 12.3%
+  (BC) and Sharpe 0.75 / 0.81. The same seed puts DT and BC in the same mode, and the two modes
+  have indistinguishable validation MSE (~3.3e-3) - held-out imitation loss cannot separate
+  them, so the K sweep (one seed per K) cannot attribute its Sharpe trend to K. Universe B
+  never enters the bad mode (all five seeds at 4.6%).
+- PPO's mean book is uniform to ten decimal places (HHI = 1/14 exactly) on every seed; CQL's HHI
+  averages 0.232 (up to 0.283, with a single 42% position at seed 789) and its three largest
+  holdings are Nvidia, Amazon and Apple on *every* seed - 63-84% of capital. In Universe B its
+  mean book is 80.2% Nvidia + 13.2% Bitcoin. Its high CAGR is concentration, not skill.
+
+Caveat for anyone re-running these: `run_paper_ablations.py --part conc` holds a model per
+iteration and was OOM-killed once when run for all 8 models at once; `--only <model>` runs one
+model's five seeds and merges into the existing CSV.
 
 ## Known Limitations
 

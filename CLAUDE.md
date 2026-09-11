@@ -47,7 +47,23 @@ Figures: `python scripts/run_eda.py`, `python scripts/run_eval_plots.py` (they r
 tables it reads and the figures it writes through the config, so it plots Universe B into
 `results/figures/eval/universe_B/`; `run_eda.py` is still Universe A only. The evaluation stage
 itself emits only `rtg_calibration.png` — every other figure comes from these scripts, run by hand.
-Paper: `cd paper; pdflatex main.tex`.
+
+Paper-specific artifacts (the term paper reads these, the pipeline stages do not produce them):
+
+```powershell
+python scripts/run_paper_ablations.py --part cost   # ablation_transaction_cost.csv (no training)
+python scripts/run_paper_ablations.py --part conc   # portfolio_concentration.csv (no training)
+python scripts/run_paper_ablations.py --part k      # retrains DT at K=10/20/50, ~1h on a GTX 1070
+python scripts/run_paper_figures.py                 # -> results/figures/paper/
+```
+
+`--part k` reuses `dt_seed42.pt` for K=30 (identical config) and tags the others
+`dt_K{K}_seed42.pt`, so it never clobbers the main sweep; re-running skips any K whose
+checkpoint exists.
+
+Papers: `cd paper; pdflatex main.tex` (research draft) and
+`cd term_paper; pdflatex main.tex; bibtex main; pdflatex main.tex; pdflatex main.tex`
+(course term paper, `\graphicspath` points at `../results/figures/`).
 
 ## Architecture
 
