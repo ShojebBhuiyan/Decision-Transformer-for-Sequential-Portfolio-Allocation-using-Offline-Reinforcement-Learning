@@ -141,8 +141,9 @@ python scripts/run_universe_b.py --stage evaluate
 ### 3. Notebooks & figures
 
 ```bash
-python scripts/run_eda.py           # EDA figures → results/figures/eda/
-python scripts/run_eval_plots.py    # Eval figures → results/figures/eval/
+python scripts/run_eda.py                          # EDA figures → results/figures/eda/
+python scripts/run_eval_plots.py                   # Eval figures → results/figures/eval/
+python scripts/run_eval_plots.py --universe B      # → results/figures/eval/universe_B/
 jupyter notebook notebooks/
 ```
 
