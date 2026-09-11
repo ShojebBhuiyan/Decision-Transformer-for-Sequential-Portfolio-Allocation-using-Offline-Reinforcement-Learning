@@ -36,3 +36,16 @@ Thumbs.db
 # TensorBoard
 runs/
 lightning_logs/
+
+# LaTeX build artifacts (the compiled PDF is tracked; the figures it needs are not)
+*.aux
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.toc
+paper/*.log
+paper/*.out
+term_paper/*.log
+term_paper/*.out
